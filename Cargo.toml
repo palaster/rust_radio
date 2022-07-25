@@ -1,0 +1,15 @@
+[package]
+name = "rust_radio"
+version = "1.0.0"
+authors = ["Pat Laster <palaster307@gmail.com>"]
+edition = "2021"
+license = "AGPL-3.0"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+glib = "0.15.12"
+gtk = "0.15.5"
+pls = "0.2.2"
+gstreamer = "0.18.8"
+lazy_static = "1.4.0"
