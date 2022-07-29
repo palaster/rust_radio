@@ -4,7 +4,7 @@ extern crate lazy_static;
 use glib::{clone, MainLoop};
 use gtk::prelude::*;
 
-use gtk::{Application, ApplicationWindow, Box, Builder, Button, MenuItem};
+use gtk::{Application, ApplicationWindow, Box, Builder, Button, Entry, MenuItem, Window};
 
 use pls::PlaylistElement;
 
@@ -21,14 +21,6 @@ lazy_static! {
     static ref CURRENT_STATION_PIPELINE: Arc<Mutex<Option<Element>>> = Arc::new(Mutex::new(None));
     static ref CURRENT_STATION_LOOP: Arc<Mutex<Option<MainLoop>>> = Arc::new(Mutex::new(None));
 }
-
-/*
-enum RadioMessage {
-    Play,
-    Pause,
-    Die,
-}
-*/
 
 fn get_stations() -> Vec<Vec<PlaylistElement>> {
     let mut working_dir = env::current_dir().expect("Couldn't get current_dir");
@@ -143,6 +135,80 @@ fn play_station(station: String) {
     pipeline.set_state(gstreamer::State::Null).expect("Couldn't set state to null");
 }
 
+fn create_station(station_name: String, station_location: String) {
+    let mut working_dir = env::current_dir().expect("Couldn't get current_dir");
+    working_dir.push("stations");
+    if !working_dir.exists() {
+        match fs::create_dir(&working_dir) {
+            Err(_) => {
+                println!("Couldn't create stations directory maybe because it exists");
+            },
+            _ => {},
+        }
+    }
+    if !working_dir.exists() {
+        panic!("Couldn't create stations directory");
+    }
+
+    working_dir.push(station_name.to_lowercase().replace(" ", "_") + ".pls");
+
+    pls::write(
+        &[PlaylistElement {
+            path: station_location,
+            title: Some(station_name.clone()),
+            len:  pls::ElementLength::Unknown,
+        }],
+        &mut File::create(working_dir).expect("Couldn't create station file")
+    ).expect("Coulnd't write to station pls");
+}
+
+fn create_station_window(application: &Application, radio_station_box: &Box, play_pause_button: &Button) {
+    let builder = Builder::from_string(include_str!("new_station.glade"));
+
+    let window: Window = builder.object("new_station_window").expect("Couldn't get new_station_window");
+    window.set_application(Some(application));
+    window.set_title("Create New Station");
+
+    let add: Button = builder.object("add_button").expect("Couldn't get add_button");
+    let cancel: Button = builder.object("cancel_button").expect("Couldn't get cancel_button");
+
+    let station_name_entry: Entry = builder.object("station_name_entry").expect("Couldn't get station_name_entry");
+    let station_location_entry: Entry = builder.object("station_location_entry").expect("Couldn't get station_location_entry");
+
+    add.connect_clicked(clone!{@weak window, @weak radio_station_box, @weak play_pause_button, @weak station_name_entry, @weak station_location_entry => move |_| {
+        create_station(station_name_entry.text().to_string(), station_location_entry.text().to_string());
+
+        let button = Button::with_label(&station_name_entry.text().to_string());
+        button.connect_clicked(clone!{@weak play_pause_button => move |_| {
+            let station = station_location_entry.text().to_string();
+            let mut current_station_pipeline = CURRENT_STATION_PIPELINE.lock().expect("Couldn't lock current_station_pipeline");
+            if let Some(pipeline) = &*current_station_pipeline {
+                let _ = pipeline.set_state(gstreamer::State::Ready);
+            }
+            *current_station_pipeline = None;
+            let mut current_station_loop = CURRENT_STATION_LOOP.lock().expect("Couldn't lock current_station_loop");
+            if let Some(main_loop) = &*current_station_loop {
+                main_loop.quit();
+            }
+            *current_station_loop = None;
+            thread::spawn(move || {
+                play_station(station);
+            });
+            play_pause_button.set_label("gtk-media-pause");
+        }});
+        button.show();
+        radio_station_box.add(&button);
+
+        window.close();
+    }});
+
+    cancel.connect_clicked(clone!{@weak window => move |_| {
+        window.close();
+    }});
+
+    window.show_all();
+}
+
 fn build_ui(application: &gtk::Application) {
     let builder = Builder::from_string(include_str!("rust_radio.glade"));
 
@@ -150,7 +216,7 @@ fn build_ui(application: &gtk::Application) {
     window.set_application(Some(application));
     window.set_title("Radio Rust");
 
-    let _new: MenuItem = builder.object("new_menu_item").expect("Couldn't get new_menu_item");
+    let new: MenuItem = builder.object("new_menu_item").expect("Couldn't get new_menu_item");
     let quit: MenuItem = builder.object("quit_menu_item").expect("Couldn't get quit_menu_item");
 
     let radio_station_box: Box = builder.object("radio_station_box").expect("Couldn't get radio_station_box");
@@ -165,11 +231,9 @@ fn build_ui(application: &gtk::Application) {
         *current_station_loop = None;
     });
 
-    /*
-    new.connect_activate(clone!{@weak application, @weak process_box => move |_| {
-        create_setup_window(&application, &process_box);
+    new.connect_activate(clone!{@weak application, @weak radio_station_box, @weak play_pause_button => move |_| {
+        create_station_window(&application, &radio_station_box, &play_pause_button);
     }});
-    */
 
     quit.connect_activate(clone!{@weak window => move |_| {
         window.close();
