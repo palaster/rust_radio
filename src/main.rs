@@ -11,7 +11,7 @@ use pls::PlaylistElement;
 use gstreamer::prelude::*;
 use gstreamer::Element;
 
-use std::{env, fs};
+use std::fs;
 use fs::File;
 use std::io::{Write};
 use std::sync::{Arc, Mutex};
@@ -23,23 +23,20 @@ lazy_static! {
 }
 
 fn get_stations() -> Vec<Vec<PlaylistElement>> {
-    let mut working_dir = env::current_dir().expect("Couldn't get current_dir");
-    working_dir.push("stations");
-    if !working_dir.exists() {
-        match fs::create_dir(&working_dir) {
-            Err(_) => {
-                println!("Couldn't create stations directory maybe because it exists");
-            },
-            _ => {},
+    let mut audio_dir = dirs::audio_dir().expect("Couldn't get audio_dir");
+    audio_dir.push("rust_radio");
+    if !audio_dir.exists() {
+        if let Err(_) = fs::create_dir(&audio_dir) {
+            println!("Couldn't create rust_radio directory maybe because it exists");
         }
     }
-    if !working_dir.exists() {
-        panic!("Couldn't create stations directory");
+    if !audio_dir.exists() {
+        panic!("Couldn't create rust_radio directory");
     }
 
     let mut stations: Vec<Vec<PlaylistElement>> = Vec::new();
 
-    if let Ok(entries) = fs::read_dir(&working_dir) {
+    if let Ok(entries) = fs::read_dir(&audio_dir) {
         for entry in entries {
             if let Ok(entry) = entry {
                 if entry.file_type().expect("Couldn't get entry file type").is_file() {
@@ -136,21 +133,18 @@ fn play_station(station: String) {
 }
 
 fn create_station(station_name: String, station_location: String) {
-    let mut working_dir = env::current_dir().expect("Couldn't get current_dir");
-    working_dir.push("stations");
-    if !working_dir.exists() {
-        match fs::create_dir(&working_dir) {
-            Err(_) => {
-                println!("Couldn't create stations directory maybe because it exists");
-            },
-            _ => {},
+    let mut audio_dir = dirs::audio_dir().expect("Couldn't get audio_dir");
+    audio_dir.push("rust_radio");
+    if !audio_dir.exists() {
+        if let Err(_) = fs::create_dir(&audio_dir) {
+            println!("Couldn't create rust_radio directory maybe because it exists");
         }
     }
-    if !working_dir.exists() {
-        panic!("Couldn't create stations directory");
+    if !audio_dir.exists() {
+        panic!("Couldn't create rust_radio directory");
     }
 
-    working_dir.push(station_name.to_lowercase().replace(" ", "_") + ".pls");
+    audio_dir.push(station_name.to_lowercase().replace(" ", "_") + ".pls");
 
     pls::write(
         &[PlaylistElement {
@@ -158,7 +152,7 @@ fn create_station(station_name: String, station_location: String) {
             title: Some(station_name.clone()),
             len:  pls::ElementLength::Unknown,
         }],
-        &mut File::create(working_dir).expect("Couldn't create station file")
+        &mut File::create(audio_dir).expect("Couldn't create station file")
     ).expect("Coulnd't write to station pls");
 }
 
