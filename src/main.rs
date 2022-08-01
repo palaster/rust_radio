@@ -4,7 +4,7 @@ extern crate lazy_static;
 use glib::{clone, MainLoop};
 use gtk::prelude::*;
 
-use gtk::{Application, ApplicationWindow, Box, Builder, Button, Entry, MenuItem, Window};
+use gtk::{Application, ApplicationWindow, Box, Builder, Button, Entry, Label, Window};
 
 use pls::PlaylistElement;
 
@@ -51,6 +51,46 @@ fn get_stations() -> Vec<Vec<PlaylistElement>> {
     }
 
     stations
+}
+
+fn refresh_stations(radio_station_box: &Box, play_pause_button: &Button, current_station_label: &Label) {
+    radio_station_box.foreach(|widget| unsafe {
+        widget.destroy()
+    });
+
+    for station in get_stations() {
+        if station.len() != 1 {
+            println!("Only for use with streams");
+            break;
+        }
+        let playlist_element = station[0].clone();
+        let title = match playlist_element.title {
+            Some(t) => t,
+            None => String::from("Unknown"),
+        };
+        let button = Button::with_label(&title);
+        button.connect_clicked(clone!{@weak play_pause_button, @weak current_station_label => move |_| {
+            let title = title.clone();
+            let station = playlist_element.path.clone();
+            let mut current_station_pipeline = CURRENT_STATION_PIPELINE.lock().expect("Couldn't lock current_station_pipeline");
+            if let Some(pipeline) = &*current_station_pipeline {
+                let _ = pipeline.set_state(gstreamer::State::Ready);
+            }
+            *current_station_pipeline = None;
+            let mut current_station_loop = CURRENT_STATION_LOOP.lock().expect("Couldn't lock current_station_loop");
+            if let Some(main_loop) = &*current_station_loop {
+                main_loop.quit();
+            }
+            *current_station_loop = None;
+            thread::spawn(move || {
+                play_station(station);
+            });
+            play_pause_button.set_label("gtk-media-pause");
+            current_station_label.set_label(&(String::from("Current Station ") + &title));
+        }});
+        button.show();
+        radio_station_box.add(&button);
+    }
 }
 
 fn play_station(station: String) {
@@ -210,8 +250,11 @@ fn build_ui(application: &gtk::Application) {
     window.set_application(Some(application));
     window.set_title("Radio Rust");
 
-    let new: MenuItem = builder.object("new_menu_item").expect("Couldn't get new_menu_item");
-    let quit: MenuItem = builder.object("quit_menu_item").expect("Couldn't get quit_menu_item");
+    let new_button: Button = builder.object("new_button").expect("Couldn't get new_button");
+    let refresh_button: Button = builder.object("refresh_button").expect("Couldn't get refresh_button");
+    let close_button: Button = builder.object("close_button").expect("Couldn't get close_button");
+
+    let current_station_label: Label = builder.object("current_station_label").expect("Couldn't get current_station_label");
 
     let radio_station_box: Box = builder.object("radio_station_box").expect("Couldn't get radio_station_box");
 
@@ -225,11 +268,15 @@ fn build_ui(application: &gtk::Application) {
         *current_station_loop = None;
     });
 
-    new.connect_activate(clone!{@weak application, @weak radio_station_box, @weak play_pause_button => move |_| {
+    new_button.connect_clicked(clone!{@weak application, @weak radio_station_box, @weak play_pause_button => move |_| {
         create_station_window(&application, &radio_station_box, &play_pause_button);
     }});
 
-    quit.connect_activate(clone!{@weak window => move |_| {
+    refresh_button.connect_clicked(clone!{@weak radio_station_box, @weak play_pause_button, @weak current_station_label => move |_| {
+        refresh_stations(&radio_station_box, &play_pause_button, &current_station_label);
+    }});
+
+    close_button.connect_clicked(clone!{@weak window => move |_| {
         window.close();
     }});
 
@@ -254,12 +301,13 @@ fn build_ui(application: &gtk::Application) {
             break;
         }
         let playlist_element = station[0].clone();
-        let title = match &playlist_element.title {
+        let title = match playlist_element.title {
             Some(t) => t,
-            None => "Unknown",
+            None => String::from("Unknown"),
         };
-        let button = Button::with_label(title);
-        button.connect_clicked(clone!{@weak play_pause_button => move |_| {
+        let button = Button::with_label(&title);
+        button.connect_clicked(clone!{@weak play_pause_button, @weak current_station_label => move |_| {
+            let title = title.clone();
             let station = playlist_element.path.clone();
             let mut current_station_pipeline = CURRENT_STATION_PIPELINE.lock().expect("Couldn't lock current_station_pipeline");
             if let Some(pipeline) = &*current_station_pipeline {
@@ -275,6 +323,7 @@ fn build_ui(application: &gtk::Application) {
                 play_station(station);
             });
             play_pause_button.set_label("gtk-media-pause");
+            current_station_label.set_label(&(String::from("Current Station ") + &title));
         }});
         radio_station_box.add(&button);
     }
