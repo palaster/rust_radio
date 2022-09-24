@@ -1,25 +1,30 @@
 #[macro_use]
 extern crate lazy_static;
 
-use glib::{clone, MainLoop};
+use glib::{clone};
 use gtk::prelude::*;
 
 use gtk::{Application, ApplicationWindow, Box, Builder, Button, Entry, Label, Window};
 
 use pls::PlaylistElement;
 
-use gstreamer::prelude::*;
-use gstreamer::Element;
-
-use std::fs;
-use fs::File;
+use std::fs::{self, File};
 use std::io::{Write};
-use std::sync::{Arc, Mutex};
-use std::thread;
+use std::sync::{mpsc::{self, Receiver, Sender}, Arc, Mutex};
+
+use rodio::{Decoder, OutputStream, Sink};
+
+const CHUNKS_BEFORE_START: u8 = 5;
 
 lazy_static! {
-    static ref CURRENT_STATION_PIPELINE: Arc<Mutex<Option<Element>>> = Arc::new(Mutex::new(None));
-    static ref CURRENT_STATION_LOOP: Arc<Mutex<Option<MainLoop>>> = Arc::new(Mutex::new(None));
+    static ref SINK_SENDER: Arc<Mutex<Option<Sender<SinkCommands>>>> = Arc::new(Mutex::new(None));
+}
+
+enum SinkCommands {
+    Start(String, String),
+    Play,
+    Pause,
+    Quit,
 }
 
 fn get_stations() -> Vec<Vec<PlaylistElement>> {
@@ -72,19 +77,20 @@ fn refresh_stations(radio_station_box: &Box, play_pause_button: &Button, current
         button.connect_clicked(clone!{@weak play_pause_button, @weak current_station_label => move |_| {
             let title = title.clone();
             let station = playlist_element.path.clone();
-            let mut current_station_pipeline = CURRENT_STATION_PIPELINE.lock().expect("Couldn't lock current_station_pipeline");
-            if let Some(pipeline) = &*current_station_pipeline {
-                let _ = pipeline.set_state(gstreamer::State::Ready);
+            let mut sink_sender = SINK_SENDER.lock().expect("Couldn't lock SINK_SENDER");
+            match &*sink_sender {
+                Some(sender) => {
+                    sender.send(SinkCommands::Start(title.clone(), station)).unwrap();
+                },
+                None => {
+                    let (sender, receiver) = mpsc::channel();
+                    let title_clone = title.clone();
+                    tokio::spawn(async move {
+                        start_ratio(receiver, title_clone, station).await;
+                    });
+                    *sink_sender = Some(sender);
+                },
             }
-            *current_station_pipeline = None;
-            let mut current_station_loop = CURRENT_STATION_LOOP.lock().expect("Couldn't lock current_station_loop");
-            if let Some(main_loop) = &*current_station_loop {
-                main_loop.quit();
-            }
-            *current_station_loop = None;
-            thread::spawn(move || {
-                play_station(station);
-            });
             play_pause_button.set_label("gtk-media-pause");
             current_station_label.set_label(&(String::from("Current Station ") + &title));
         }});
@@ -93,86 +99,93 @@ fn refresh_stations(radio_station_box: &Box, play_pause_button: &Button, current
     }
 }
 
-fn play_station(station: String) {
-    gstreamer::init().expect("Couldn't init gst");
+async fn start_ratio(receiver: Receiver<SinkCommands>, name: String, url: String) {
+    let (sink_sender, sink_receiver) = mpsc::channel::<SinkCommands>();
 
-    let pipeline = gstreamer::parse_launch(&format!("playbin uri={}", station)).expect("Couldn't parse launch");
-
-    let result = pipeline.set_state(gstreamer::State::Playing).expect("Couldn't set state to playing");
-    let is_live = result == gstreamer::StateChangeSuccess::NoPreroll;
-
-    let main_loop = glib::MainLoop::new(None, false);
-    let main_loop_clone = main_loop.clone();
-    let pipeline_weak = pipeline.downgrade();
-    let bus = pipeline.bus().expect("Pipeline has no bus");
-
-    bus.add_watch(move |_, msg| {
-        let pipeline = match pipeline_weak.upgrade() {
-            Some(pipeline) => pipeline,
-            None => return glib::Continue(true),
-        };
-        let main_loop = &main_loop_clone;
-        match msg.view() {
-            gstreamer::MessageView::Error(err) => {
-                println!(
-                    "Error from {:?}: {} ({:?})",
-                    err.src().map(|s| s.path_string()),
-                    err.error(),
-                    err.debug()
-                );
-                let _ = pipeline.set_state(gstreamer::State::Ready);
-                main_loop.quit();
-            }
-            gstreamer::MessageView::Eos(..) => {
-                // end-of-stream
-                let _ = pipeline.set_state(gstreamer::State::Ready);
-                main_loop.quit();
-            }
-            gstreamer::MessageView::Buffering(buffering) => {
-                // If the stream is live, we do not care about buffering
-                if is_live {
-                    return glib::Continue(true);
-                }
-
-                let percent = buffering.percent();
-                print!("Buffering ({}%)\r", percent);
-                match std::io::stdout().flush() {
-                    Ok(_) => {}
-                    Err(err) => eprintln!("Failed: {}", err),
-                };
-
-                // Wait until buffering is complete before start/resume playing
-                if percent < 100 {
-                    let _ = pipeline.set_state(gstreamer::State::Paused);
-                } else {
-                    let _ = pipeline.set_state(gstreamer::State::Playing);
+    std::thread::spawn(move || {
+        let (_stream, stream_handle) = OutputStream::try_default().expect("Couldn't get default output stream");
+        let mut sink = Sink::try_new(&stream_handle).expect("Couldn't create new sink from stream_handle");
+        let mut path = None;
+        let mut file;
+        let mut source;
+        loop {
+            if let Ok(message) = sink_receiver.try_recv() {
+                match message {
+                    SinkCommands::Start(name, _) => {
+                        sink.stop();
+                        sink = Sink::try_new(&stream_handle).expect("Couldn't create new sink from stream_handle");
+                        if let Some(old_path) = path {
+                            match fs::remove_file(old_path) {
+                                _ => {},
+                            }
+                        }
+                        let mut new_path = std::env::temp_dir();
+                        new_path.push(&name);
+                        file = File::open(&new_path).expect(&format!("Couldn't open file {}", &name));
+                        path = Some(new_path);
+                        source = Decoder::new(file).expect("Can't create decoder from file");
+                        sink.play();
+                        sink.append(source);
+                    },
+                    SinkCommands::Play => {
+                        sink.play();
+                    },
+                    SinkCommands::Pause => {
+                        sink.pause();
+                    },
+                    SinkCommands::Quit => {
+                        return;
+                    },
                 }
             }
-            gstreamer::MessageView::ClockLost(_) => {
-                // Get a new clock
-                let _ = pipeline.set_state(gstreamer::State::Paused);
-                let _ = pipeline.set_state(gstreamer::State::Playing);
-            }
-            _ => (),
         }
-        glib::Continue(true)
-    })
-    .expect("Failed to add bus watch");
+    });
 
-    {
-        let mut current_station_pipeline = CURRENT_STATION_PIPELINE.lock().expect("Couldn't lock current_station_pipeline");
-        let mut current_station_loop = CURRENT_STATION_LOOP.lock().expect("Couldn't lock current_station_loop");
-        *current_station_pipeline = Some(pipeline.clone());
-        *current_station_loop = Some(main_loop.clone());
+    let mut name = name.to_lowercase().replace(" ", "_");
+    let mut url = url;
+    let mut count_down = CHUNKS_BEFORE_START;
+    let mut should_restart = true;
+
+    loop {
+        let mut path = std::env::temp_dir();
+        path.push(&name);
+        let mut file = File::create(path).expect(&format!("Couldn't create file {}", &name));
+
+        let client = reqwest::Client::new();
+        let mut response = client.get(&url).send().await.expect("Couldn't get response");
+        while let Some(chunk) = response.chunk().await.expect("Couldn't get next chunk") {
+            file.write(&chunk).expect("Couldn't write to file");
+            if let Ok(message) = receiver.try_recv() {
+                match message {
+                    SinkCommands::Start(new_name, new_url) => {
+                        name = new_name.to_lowercase().replace(" ", "_");
+                        url = new_url;
+                        count_down = CHUNKS_BEFORE_START;
+                        should_restart = true;
+                        break;
+                    },
+                    SinkCommands::Quit => {
+                        sink_sender.send(message).unwrap();
+                        return;
+                    },
+                    _ => {
+                        sink_sender.send(message).unwrap();
+                    },
+                }
+            }
+            if should_restart {
+                if count_down == 0 {
+                    sink_sender.send(SinkCommands::Start(name.clone(), url.clone())).unwrap();
+                    should_restart = false;
+                } else {
+                    count_down -= 1;
+                }
+            }
+        }
     }
-
-    main_loop.run();
-
-    bus.remove_watch().expect("Couldn't remove watch from bus");
-    pipeline.set_state(gstreamer::State::Null).expect("Couldn't set state to null");
 }
 
-fn create_station(station_name: String, station_location: String) {
+fn create_station(name: String, url: String) {
     let mut audio_dir = dirs::audio_dir().expect("Couldn't get audio_dir");
     audio_dir.push("rust_radio");
     if !audio_dir.exists() {
@@ -184,19 +197,19 @@ fn create_station(station_name: String, station_location: String) {
         panic!("Couldn't create rust_radio directory");
     }
 
-    audio_dir.push(station_name.to_lowercase().replace(" ", "_") + ".pls");
+    audio_dir.push(name.to_lowercase().replace(" ", "_") + ".pls");
 
     pls::write(
         &[PlaylistElement {
-            path: station_location,
-            title: Some(station_name.clone()),
+            path: url,
+            title: Some(name.clone()),
             len:  pls::ElementLength::Unknown,
         }],
         &mut File::create(audio_dir).expect("Couldn't create station file")
     ).expect("Coulnd't write to station pls");
 }
 
-fn create_station_window(application: &Application, radio_station_box: &Box, play_pause_button: &Button) {
+fn create_station_window(application: &Application, radio_station_box: &Box, play_pause_button: &Button, current_station_label: &Label) {
     let builder = Builder::from_string(include_str!("new_station.glade"));
 
     let window: Window = builder.object("new_station_window").expect("Couldn't get new_station_window");
@@ -209,26 +222,29 @@ fn create_station_window(application: &Application, radio_station_box: &Box, pla
     let station_name_entry: Entry = builder.object("station_name_entry").expect("Couldn't get station_name_entry");
     let station_location_entry: Entry = builder.object("station_location_entry").expect("Couldn't get station_location_entry");
 
-    add.connect_clicked(clone!{@weak window, @weak radio_station_box, @weak play_pause_button, @weak station_name_entry, @weak station_location_entry => move |_| {
+    add.connect_clicked(clone!{@weak window, @weak radio_station_box, @weak play_pause_button, @weak current_station_label, @weak station_name_entry, @weak station_location_entry => move |_| {
         create_station(station_name_entry.text().to_string(), station_location_entry.text().to_string());
 
         let button = Button::with_label(&station_name_entry.text().to_string());
-        button.connect_clicked(clone!{@weak play_pause_button => move |_| {
+        button.connect_clicked(clone!{@weak play_pause_button, @weak current_station_label => move |_| {
+            let title = station_name_entry.text().to_string();
             let station = station_location_entry.text().to_string();
-            let mut current_station_pipeline = CURRENT_STATION_PIPELINE.lock().expect("Couldn't lock current_station_pipeline");
-            if let Some(pipeline) = &*current_station_pipeline {
-                let _ = pipeline.set_state(gstreamer::State::Ready);
+            let mut sink_sender = SINK_SENDER.lock().expect("Couldn't lock SINK_SENDER");
+            match &*sink_sender {
+                Some(sender) => {
+                    sender.send(SinkCommands::Start(title.clone(), station)).unwrap();
+                },
+                None => {
+                    let (sender, receiver) = mpsc::channel();
+                    let title_clone = title.clone();
+                    tokio::spawn(async move {
+                        start_ratio(receiver, title_clone, station).await;
+                    });
+                    *sink_sender = Some(sender);
+                },
             }
-            *current_station_pipeline = None;
-            let mut current_station_loop = CURRENT_STATION_LOOP.lock().expect("Couldn't lock current_station_loop");
-            if let Some(main_loop) = &*current_station_loop {
-                main_loop.quit();
-            }
-            *current_station_loop = None;
-            thread::spawn(move || {
-                play_station(station);
-            });
             play_pause_button.set_label("gtk-media-pause");
+            current_station_label.set_label(&(String::from("Current Station ") + &title));
         }});
         button.show();
         radio_station_box.add(&button);
@@ -261,15 +277,15 @@ fn build_ui(application: &gtk::Application) {
     let play_pause_button: Button = builder.object("play_pause_button").expect("Couldn't get play_pause_button");
 
     window.connect_destroy_with_parent_notify(move |_| {
-        let mut current_station_loop = CURRENT_STATION_LOOP.lock().expect("Couldn't lock current_station_loop");
-        if let Some(main_loop) = &*current_station_loop {
-            main_loop.quit();
+        let mut sink_sender = SINK_SENDER.lock().expect("Couldn't lock SINK_SENDER");
+        if let Some(sender) = &*sink_sender {
+            sender.send(SinkCommands::Quit).unwrap();
         }
-        *current_station_loop = None;
+        *sink_sender = None;
     });
 
-    new_button.connect_clicked(clone!{@weak application, @weak radio_station_box, @weak play_pause_button => move |_| {
-        create_station_window(&application, &radio_station_box, &play_pause_button);
+    new_button.connect_clicked(clone!{@weak application, @weak radio_station_box, @weak play_pause_button, @weak current_station_label => move |_| {
+        create_station_window(&application, &radio_station_box, &play_pause_button, &current_station_label);
     }});
 
     refresh_button.connect_clicked(clone!{@weak radio_station_box, @weak play_pause_button, @weak current_station_label => move |_| {
@@ -283,13 +299,13 @@ fn build_ui(application: &gtk::Application) {
     play_pause_button.connect_clicked(clone!{@weak play_pause_button => move |_| {
         let label = play_pause_button.label().expect("Couldn't get play_pause_button's label");
         let will_pause = !label.as_str().eq("gtk-media-play");
-        let current_station_pipeline = CURRENT_STATION_PIPELINE.lock().expect("Couldn't lock current_station_pipeline");
-        if let Some(pipeline) = &*current_station_pipeline {
+        let sink_sender = SINK_SENDER.lock().expect("Couldn't lock SINK_SENDER");
+        if let Some(sender) = &*sink_sender {
             if will_pause {
-                let _ = pipeline.set_state(gstreamer::State::Paused);
+                sender.send(SinkCommands::Pause).unwrap();
                 play_pause_button.set_label("gtk-media-play");
             } else {
-                let _ = pipeline.set_state(gstreamer::State::Playing);
+                sender.send(SinkCommands::Play).unwrap();
                 play_pause_button.set_label("gtk-media-pause");
             }
         }
@@ -309,19 +325,20 @@ fn build_ui(application: &gtk::Application) {
         button.connect_clicked(clone!{@weak play_pause_button, @weak current_station_label => move |_| {
             let title = title.clone();
             let station = playlist_element.path.clone();
-            let mut current_station_pipeline = CURRENT_STATION_PIPELINE.lock().expect("Couldn't lock current_station_pipeline");
-            if let Some(pipeline) = &*current_station_pipeline {
-                let _ = pipeline.set_state(gstreamer::State::Ready);
+            let mut sink_sender = SINK_SENDER.lock().expect("Couldn't lock SINK_SENDER");
+            match &*sink_sender {
+                Some(sender) => {
+                    sender.send(SinkCommands::Start(title.clone(), station)).unwrap();
+                },
+                None => {
+                    let (sender, receiver) = mpsc::channel();
+                    let title_clone = title.clone();
+                    tokio::spawn(async move {
+                        start_ratio(receiver, title_clone, station).await;
+                    });
+                    *sink_sender = Some(sender);
+                },
             }
-            *current_station_pipeline = None;
-            let mut current_station_loop = CURRENT_STATION_LOOP.lock().expect("Couldn't lock current_station_loop");
-            if let Some(main_loop) = &*current_station_loop {
-                main_loop.quit();
-            }
-            *current_station_loop = None;
-            thread::spawn(move || {
-                play_station(station);
-            });
             play_pause_button.set_label("gtk-media-pause");
             current_station_label.set_label(&(String::from("Current Station ") + &title));
         }});
@@ -331,7 +348,8 @@ fn build_ui(application: &gtk::Application) {
     window.show_all();
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let application = Application::builder()
         .application_id("com.github.palaster.rust_radio")
         .build();
