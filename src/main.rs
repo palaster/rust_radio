@@ -14,7 +14,7 @@ use std::sync::{mpsc::{self, Receiver, Sender}, Arc, Mutex};
 
 use rodio::{Decoder, OutputStream, Sink};
 
-const CHUNKS_BEFORE_START: u8 = 5;
+const CHUNKS_BEFORE_START: u8 = 10;
 
 lazy_static! {
     static ref SINK_SENDER: Arc<Mutex<Option<Sender<SinkCommands>>>> = Arc::new(Mutex::new(None));
@@ -113,17 +113,33 @@ async fn start_ratio(receiver: Receiver<SinkCommands>, name: String, url: String
                 match message {
                     SinkCommands::Start(name, _) => {
                         sink.stop();
-                        sink = Sink::try_new(&stream_handle).expect("Couldn't create new sink from stream_handle");
+                        sink = match Sink::try_new(&stream_handle) {
+                            Ok(t) => t,
+                            _ => { continue; },
+                        };
                         if let Some(old_path) = path {
                             match fs::remove_file(old_path) {
                                 _ => {},
                             }
                         }
+                        path = None;
                         let mut new_path = std::env::temp_dir();
                         new_path.push(&name);
-                        file = File::open(&new_path).expect(&format!("Couldn't open file {}", &name));
+                        file = match File::open(&new_path) {
+                            Ok(t) => t,
+                            Err(_) => {
+                                println!("Couldn't open file {}", &name);
+                                continue;
+                            },
+                        };
                         path = Some(new_path);
-                        source = Decoder::new(file).expect("Can't create decoder from file");
+                        source = match Decoder::new(file) {
+                            Ok(t) => t,
+                            Err(_) => {
+                                println!("Can't create decoder from file");
+                                continue;
+                            },
+                        };
                         sink.play();
                         sink.append(source);
                     },
@@ -158,7 +174,11 @@ async fn start_ratio(receiver: Receiver<SinkCommands>, name: String, url: String
             if let Ok(message) = receiver.try_recv() {
                 match message {
                     SinkCommands::Start(new_name, new_url) => {
-                        name = new_name.to_lowercase().replace(" ", "_");
+                        let new_name = new_name.to_lowercase().replace(" ", "_");
+                        if name == new_name && url == new_url {
+                            continue;
+                        }
+                        name = new_name;
                         url = new_url;
                         count_down = CHUNKS_BEFORE_START;
                         should_restart = true;
@@ -175,7 +195,9 @@ async fn start_ratio(receiver: Receiver<SinkCommands>, name: String, url: String
             }
             if should_restart {
                 if count_down == 0 {
-                    sink_sender.send(SinkCommands::Start(name.clone(), url.clone())).unwrap();
+                    match sink_sender.send(SinkCommands::Start(name.clone(), url.clone())) {
+                        _ => {},
+                    }
                     should_restart = false;
                 } else {
                     count_down -= 1;
@@ -328,7 +350,9 @@ fn build_ui(application: &gtk::Application) {
             let mut sink_sender = SINK_SENDER.lock().expect("Couldn't lock SINK_SENDER");
             match &*sink_sender {
                 Some(sender) => {
-                    sender.send(SinkCommands::Start(title.clone(), station)).unwrap();
+                    match sender.send(SinkCommands::Start(title.clone(), station)) {
+                        _ => {},
+                    }
                 },
                 None => {
                     let (sender, receiver) = mpsc::channel();
