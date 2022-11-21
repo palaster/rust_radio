@@ -1,10 +1,8 @@
 #[macro_use]
 extern crate lazy_static;
 
-use glib::{clone};
-use gtk::prelude::*;
-
-use gtk::{Application, ApplicationWindow, Box, Builder, Button, Entry, Label, Window};
+use eframe::egui::{CentralPanel, TopBottomPanel};
+use eframe::{App, run_native};
 
 use pls::PlaylistElement;
 
@@ -25,6 +23,88 @@ enum SinkCommands {
     Play,
     Pause,
     Quit,
+}
+
+#[derive(Default)]
+struct Radio {
+    is_playing: bool,
+    current_station: Option<String>,
+    creation_name: String,
+    creation_url: String,
+}
+
+impl App for Radio {
+    fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
+        TopBottomPanel::top("controls").show(ctx, |ui| {
+            if ui.button(if self.is_playing { "Pause" } else { "Play" }).clicked() {
+                let sink_sender = SINK_SENDER.lock().expect("Couldn't lock SINK_SENDER");
+                if let Some(sender) = &*sink_sender {
+                    if self.is_playing {
+                        match sender.send(SinkCommands::Pause) {
+                            _ => {},
+                        }
+                    } else {
+                        match sender.send(SinkCommands::Play) {
+                            _ => {},
+                        }
+                    }
+                    self.is_playing = !self.is_playing;
+                }
+            }
+            ui.label(match &self.current_station {
+                Some(station_name) => {
+                    format!("Current Station: {}", station_name)
+                },
+                _ => {
+                    "Station Not Selected".to_string()
+                },
+            });
+        });
+        TopBottomPanel::top("new_station").show(ctx, |ui| {
+            ui.text_edit_singleline(&mut self.creation_name);
+            ui.text_edit_singleline(&mut self.creation_url);
+            if ui.button("Create Station").clicked() {
+                if !self.creation_name.is_empty() && !self.creation_url.is_empty() {
+                    create_station(self.creation_name.clone(), self.creation_url.clone());
+                }
+            }
+        });
+        CentralPanel::default().show(ctx, |ui| {
+            for station in get_stations() {
+                if station.len() != 1 {
+                    println!("Only for use with streams");
+                    break;
+                }
+                let playlist_element = station[0].clone();
+                let title = match playlist_element.title {
+                    Some(t) => t,
+                    None => String::from("Unknown"),
+                };
+                if ui.button(title.clone()).clicked() {
+                    let title = title.clone();
+                    let station = playlist_element.path.clone();
+                    let mut sink_sender = SINK_SENDER.lock().expect("Couldn't lock SINK_SENDER");
+                    match &*sink_sender {
+                        Some(sender) => {
+                            match sender.send(SinkCommands::Start(title.clone(), station)) {
+                                _ => {},
+                            }
+                        },
+                        None => {
+                            let (sender, receiver) = mpsc::channel();
+                            let title_clone = title.clone();
+                            tokio::spawn(async move {
+                                start_ratio(receiver, title_clone, station).await;
+                            });
+                            *sink_sender = Some(sender);
+                        },
+                    }
+                    self.is_playing = true;
+                    self.current_station = Some(title);
+                }
+            }
+        });
+    }
 }
 
 fn get_stations() -> Vec<Vec<PlaylistElement>> {
@@ -56,47 +136,6 @@ fn get_stations() -> Vec<Vec<PlaylistElement>> {
     }
 
     stations
-}
-
-fn refresh_stations(radio_station_box: &Box, play_pause_button: &Button, current_station_label: &Label) {
-    radio_station_box.foreach(|widget| unsafe {
-        widget.destroy()
-    });
-
-    for station in get_stations() {
-        if station.len() != 1 {
-            println!("Only for use with streams");
-            break;
-        }
-        let playlist_element = station[0].clone();
-        let title = match playlist_element.title {
-            Some(t) => t,
-            None => String::from("Unknown"),
-        };
-        let button = Button::with_label(&title);
-        button.connect_clicked(clone!{@weak play_pause_button, @weak current_station_label => move |_| {
-            let title = title.clone();
-            let station = playlist_element.path.clone();
-            let mut sink_sender = SINK_SENDER.lock().expect("Couldn't lock SINK_SENDER");
-            match &*sink_sender {
-                Some(sender) => {
-                    sender.send(SinkCommands::Start(title.clone(), station)).unwrap();
-                },
-                None => {
-                    let (sender, receiver) = mpsc::channel();
-                    let title_clone = title.clone();
-                    tokio::spawn(async move {
-                        start_ratio(receiver, title_clone, station).await;
-                    });
-                    *sink_sender = Some(sender);
-                },
-            }
-            play_pause_button.set_label("gtk-media-pause");
-            current_station_label.set_label(&(String::from("Current Station ") + &title));
-        }});
-        button.show();
-        radio_station_box.add(&button);
-    }
 }
 
 async fn start_ratio(receiver: Receiver<SinkCommands>, name: String, url: String) {
@@ -231,156 +270,7 @@ fn create_station(name: String, url: String) {
     ).expect("Coulnd't write to station pls");
 }
 
-fn create_station_window(application: &Application, radio_station_box: &Box, play_pause_button: &Button, current_station_label: &Label) {
-    let builder = Builder::from_string(include_str!("new_station.glade"));
-
-    let window: Window = builder.object("new_station_window").expect("Couldn't get new_station_window");
-    window.set_application(Some(application));
-    window.set_title("Create New Station");
-
-    let add: Button = builder.object("add_button").expect("Couldn't get add_button");
-    let cancel: Button = builder.object("cancel_button").expect("Couldn't get cancel_button");
-
-    let station_name_entry: Entry = builder.object("station_name_entry").expect("Couldn't get station_name_entry");
-    let station_location_entry: Entry = builder.object("station_location_entry").expect("Couldn't get station_location_entry");
-
-    add.connect_clicked(clone!{@weak window, @weak radio_station_box, @weak play_pause_button, @weak current_station_label, @weak station_name_entry, @weak station_location_entry => move |_| {
-        create_station(station_name_entry.text().to_string(), station_location_entry.text().to_string());
-
-        let button = Button::with_label(&station_name_entry.text().to_string());
-        button.connect_clicked(clone!{@weak play_pause_button, @weak current_station_label => move |_| {
-            let title = station_name_entry.text().to_string();
-            let station = station_location_entry.text().to_string();
-            let mut sink_sender = SINK_SENDER.lock().expect("Couldn't lock SINK_SENDER");
-            match &*sink_sender {
-                Some(sender) => {
-                    sender.send(SinkCommands::Start(title.clone(), station)).unwrap();
-                },
-                None => {
-                    let (sender, receiver) = mpsc::channel();
-                    let title_clone = title.clone();
-                    tokio::spawn(async move {
-                        start_ratio(receiver, title_clone, station).await;
-                    });
-                    *sink_sender = Some(sender);
-                },
-            }
-            play_pause_button.set_label("gtk-media-pause");
-            current_station_label.set_label(&(String::from("Current Station ") + &title));
-        }});
-        button.show();
-        radio_station_box.add(&button);
-
-        window.close();
-    }});
-
-    cancel.connect_clicked(clone!{@weak window => move |_| {
-        window.close();
-    }});
-
-    window.show_all();
-}
-
-fn build_ui(application: &gtk::Application) {
-    let builder = Builder::from_string(include_str!("rust_radio.glade"));
-
-    let window: ApplicationWindow = builder.object("main_application_window").expect("Couldn't get main_application_window");
-    window.set_application(Some(application));
-    window.set_title("Radio Rust");
-
-    let new_button: Button = builder.object("new_button").expect("Couldn't get new_button");
-    let refresh_button: Button = builder.object("refresh_button").expect("Couldn't get refresh_button");
-    let close_button: Button = builder.object("close_button").expect("Couldn't get close_button");
-
-    let current_station_label: Label = builder.object("current_station_label").expect("Couldn't get current_station_label");
-
-    let radio_station_box: Box = builder.object("radio_station_box").expect("Couldn't get radio_station_box");
-
-    let play_pause_button: Button = builder.object("play_pause_button").expect("Couldn't get play_pause_button");
-
-    window.connect_destroy_with_parent_notify(move |_| {
-        let mut sink_sender = SINK_SENDER.lock().expect("Couldn't lock SINK_SENDER");
-        if let Some(sender) = &*sink_sender {
-            sender.send(SinkCommands::Quit).unwrap();
-        }
-        *sink_sender = None;
-    });
-
-    new_button.connect_clicked(clone!{@weak application, @weak radio_station_box, @weak play_pause_button, @weak current_station_label => move |_| {
-        create_station_window(&application, &radio_station_box, &play_pause_button, &current_station_label);
-    }});
-
-    refresh_button.connect_clicked(clone!{@weak radio_station_box, @weak play_pause_button, @weak current_station_label => move |_| {
-        refresh_stations(&radio_station_box, &play_pause_button, &current_station_label);
-    }});
-
-    close_button.connect_clicked(clone!{@weak window => move |_| {
-        window.close();
-    }});
-
-    play_pause_button.connect_clicked(clone!{@weak play_pause_button => move |_| {
-        let label = play_pause_button.label().expect("Couldn't get play_pause_button's label");
-        let will_pause = !label.as_str().eq("gtk-media-play");
-        let sink_sender = SINK_SENDER.lock().expect("Couldn't lock SINK_SENDER");
-        if let Some(sender) = &*sink_sender {
-            if will_pause {
-                sender.send(SinkCommands::Pause).unwrap();
-                play_pause_button.set_label("gtk-media-play");
-            } else {
-                sender.send(SinkCommands::Play).unwrap();
-                play_pause_button.set_label("gtk-media-pause");
-            }
-        }
-    }});
-
-    for station in get_stations() {
-        if station.len() != 1 {
-            println!("Only for use with streams");
-            break;
-        }
-        let playlist_element = station[0].clone();
-        let title = match playlist_element.title {
-            Some(t) => t,
-            None => String::from("Unknown"),
-        };
-        let button = Button::with_label(&title);
-        button.connect_clicked(clone!{@weak play_pause_button, @weak current_station_label => move |_| {
-            let title = title.clone();
-            let station = playlist_element.path.clone();
-            let mut sink_sender = SINK_SENDER.lock().expect("Couldn't lock SINK_SENDER");
-            match &*sink_sender {
-                Some(sender) => {
-                    match sender.send(SinkCommands::Start(title.clone(), station)) {
-                        _ => {},
-                    }
-                },
-                None => {
-                    let (sender, receiver) = mpsc::channel();
-                    let title_clone = title.clone();
-                    tokio::spawn(async move {
-                        start_ratio(receiver, title_clone, station).await;
-                    });
-                    *sink_sender = Some(sender);
-                },
-            }
-            play_pause_button.set_label("gtk-media-pause");
-            current_station_label.set_label(&(String::from("Current Station ") + &title));
-        }});
-        radio_station_box.add(&button);
-    }
-
-    window.show_all();
-}
-
 #[tokio::main]
 async fn main() {
-    let application = Application::builder()
-        .application_id("com.github.palaster.rust_radio")
-        .build();
-
-    application.connect_activate(|app| {
-        build_ui(app)
-    });
-
-    application.run();
+    run_native("Radio Rust", eframe::NativeOptions::default(), Box::new(|_cc| Box::new(Radio::default())));
 }
