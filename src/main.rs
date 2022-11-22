@@ -66,6 +66,8 @@ impl App for Radio {
             if ui.button("Create Station").clicked() {
                 if !self.creation_name.is_empty() && !self.creation_url.is_empty() {
                     create_station(self.creation_name.clone(), self.creation_url.clone());
+                    self.creation_name = String::new();
+                    self.creation_url = String::new();
                 }
             }
         });
@@ -104,6 +106,15 @@ impl App for Radio {
                 }
             }
         });
+    }
+
+    fn on_close_event(&mut self) -> bool {
+        let mut sink_sender = SINK_SENDER.lock().expect("Couldn't lock SINK_SENDER");
+        if let Some(sender) = &*sink_sender {
+            sender.send(SinkCommands::Quit).unwrap();
+        }
+        *sink_sender = None;
+        true
     }
 }
 
