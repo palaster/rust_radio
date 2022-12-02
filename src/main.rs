@@ -1,8 +1,9 @@
 #[macro_use]
 extern crate lazy_static;
 
-use eframe::egui::{CentralPanel, TopBottomPanel};
-use eframe::{App, run_native};
+use eframe::egui::{CentralPanel};
+use eframe::epaint::Vec2;
+use eframe::{App, run_native, NativeOptions};
 
 use pls::PlaylistElement;
 
@@ -25,86 +26,108 @@ enum SinkCommands {
     Quit,
 }
 
-#[derive(Default)]
 struct Radio {
     is_playing: bool,
     current_station: Option<String>,
+    is_creation_visible: bool,
     creation_name: String,
     creation_url: String,
 }
 
+impl Default for Radio {
+    fn default() -> Self {
+        Radio {
+            is_playing: false,
+            current_station: None,
+            is_creation_visible: false,
+            creation_name: String::from("Enter Station Name"),
+            creation_url: String::from("Enter Station URL"),
+        }
+    }    
+}
+
 impl App for Radio {
     fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
-        TopBottomPanel::top("controls").show(ctx, |ui| {
-            if ui.button(if self.is_playing { "Pause" } else { "Play" }).clicked() {
-                let sink_sender = SINK_SENDER.lock().expect("Couldn't lock SINK_SENDER");
-                if let Some(sender) = &*sink_sender {
-                    if self.is_playing {
-                        match sender.send(SinkCommands::Pause) {
-                            _ => {},
-                        }
-                    } else {
-                        match sender.send(SinkCommands::Play) {
-                            _ => {},
-                        }
-                    }
-                    self.is_playing = !self.is_playing;
-                }
-            }
-            ui.label(match &self.current_station {
-                Some(station_name) => {
-                    format!("Current Station: {}", station_name)
-                },
-                _ => {
-                    "Station Not Selected".to_string()
-                },
-            });
-        });
-        TopBottomPanel::top("new_station").show(ctx, |ui| {
-            ui.text_edit_singleline(&mut self.creation_name);
-            ui.text_edit_singleline(&mut self.creation_url);
-            if ui.button("Create Station").clicked() {
-                if !self.creation_name.is_empty() && !self.creation_url.is_empty() {
-                    create_station(self.creation_name.clone(), self.creation_url.clone());
-                    self.creation_name = String::new();
-                    self.creation_url = String::new();
-                }
-            }
-        });
         CentralPanel::default().show(ctx, |ui| {
-            for station in get_stations() {
-                if station.len() != 1 {
-                    println!("Only for use with streams");
-                    break;
-                }
-                let playlist_element = station[0].clone();
-                let title = match playlist_element.title {
-                    Some(t) => t,
-                    None => String::from("Unknown"),
-                };
-                if ui.button(title.clone()).clicked() {
-                    let title = title.clone();
-                    let station = playlist_element.path.clone();
-                    let mut sink_sender = SINK_SENDER.lock().expect("Couldn't lock SINK_SENDER");
-                    match &*sink_sender {
-                        Some(sender) => {
-                            match sender.send(SinkCommands::Start(title.clone(), station)) {
+            ui.vertical_centered_justified(|ui| {
+                if ui.button(if self.is_playing { "Pause" } else { "Play" }).clicked() {
+                    let sink_sender = SINK_SENDER.lock().expect("Couldn't lock SINK_SENDER");
+                    if let Some(sender) = &*sink_sender {
+                        if self.is_playing {
+                            match sender.send(SinkCommands::Pause) {
                                 _ => {},
                             }
-                        },
-                        None => {
-                            let (sender, receiver) = mpsc::channel();
-                            let title_clone = title.clone();
-                            tokio::spawn(async move {
-                                start_ratio(receiver, title_clone, station).await;
-                            });
-                            *sink_sender = Some(sender);
-                        },
+                        } else {
+                            match sender.send(SinkCommands::Play) {
+                                _ => {},
+                            }
+                        }
+                        self.is_playing = !self.is_playing;
                     }
-                    self.is_playing = true;
-                    self.current_station = Some(title);
                 }
-            }
+                ui.label(match &self.current_station {
+                    Some(station_name) => {
+                        format!("Current Station: {}", station_name)
+                    },
+                    _ => {
+                        "Station Not Selected".to_string()
+                    },
+                });
+                if self.is_creation_visible {
+                    ui.text_edit_singleline(&mut self.creation_name);
+                    ui.text_edit_singleline(&mut self.creation_url);
+                    if ui.button("Create Station").clicked() {
+                        if !self.creation_name.is_empty() && !self.creation_url.is_empty() {
+                            create_station(self.creation_name.clone(), self.creation_url.clone());
+                            self.is_creation_visible = false;
+                            self.creation_name = String::from("Enter Station Name");
+                            self.creation_url = String::from("Enter Station URL");
+                        }
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.is_creation_visible = false;
+                        self.creation_name = String::from("Enter Station Name");
+                        self.creation_url = String::from("Enter Station URL");
+                    }
+                } else {
+                    if ui.button("Create New Station").clicked() {
+                        self.is_creation_visible = true;
+                    }
+                }
+                for station in get_stations() {
+                    if station.len() != 1 {
+                        println!("Only for use with streams");
+                        break;
+                    }
+                    let playlist_element = station[0].clone();
+                    let title = match playlist_element.title {
+                        Some(t) => t,
+                        None => String::from("Unknown"),
+                    };
+                    if ui.button(title.clone()).clicked() {
+                        let title = title.clone();
+                        let station = playlist_element.path.clone();
+                        let mut sink_sender = SINK_SENDER.lock().expect("Couldn't lock SINK_SENDER");
+                        match &*sink_sender {
+                            Some(sender) => {
+                                match sender.send(SinkCommands::Start(title.clone(), station)) {
+                                    _ => {},
+                                }
+                            },
+                            None => {
+                                let (sender, receiver) = mpsc::channel();
+                                let title_clone = title.clone();
+                                tokio::spawn(async move {
+                                    start_ratio(receiver, title_clone, station).await;
+                                });
+                                *sink_sender = Some(sender);
+                            },
+                        }
+                        self.is_playing = true;
+                        self.current_station = Some(title);
+                    }
+                }
+            });
         });
     }
 
@@ -283,5 +306,7 @@ fn create_station(name: String, url: String) {
 
 #[tokio::main]
 async fn main() {
-    run_native("Radio Rust", eframe::NativeOptions::default(), Box::new(|_cc| Box::new(Radio::default())));
+    let mut app_options = NativeOptions::default();
+    app_options.initial_window_size = Some(Vec2::new(256.0, 256.));
+    run_native("Radio Rust", app_options, Box::new(|_cc| Box::new(Radio::default())));
 }
