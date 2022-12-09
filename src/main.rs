@@ -17,6 +17,7 @@ const CHUNKS_BEFORE_START: u8 = 10;
 
 lazy_static! {
     static ref SINK_SENDER: Arc<Mutex<Option<Sender<SinkCommands>>>> = Arc::new(Mutex::new(None));
+    static ref SONG_TITLE: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 }
 
 enum SinkCommands {
@@ -73,6 +74,12 @@ impl App for Radio {
                         "Station Not Selected".to_string()
                     },
                 });
+                {
+                    let song_title = SONG_TITLE.lock().expect("Couldn't lock SONG_TITLE");
+                    if song_title.is_some() {
+                        ui.label(format!("Current Song: {}", song_title.clone().expect("")));
+                    }
+                }
                 if self.is_creation_visible {
                     ui.text_edit_singleline(&mut self.creation_name);
                     ui.text_edit_singleline(&mut self.creation_url);
@@ -241,9 +248,57 @@ async fn start_ratio(receiver: Receiver<SinkCommands>, name: String, url: String
         let mut file = File::create(path).expect(&format!("Couldn't create file {}", &name));
 
         let client = reqwest::Client::new();
-        let mut response = client.get(&url).send().await.expect("Couldn't get response");
+        let mut response = client.get(&url).header("icy-metadata", "1").send().await.expect("Couldn't get response");
+        let meta_interval: usize = match response.headers().get("icy-metaint") {
+            Some(t) => t.to_str().unwrap_or_default().parse().unwrap_or_default(),
+            _ => 0,
+        };
+        let mut counter = meta_interval;
+        let mut awaiting_metadata_size = false;
+        let mut metadata_size: u8 = 0;
+        let mut awaiting_metadata = false;
+        let mut metadata: Vec<u8> = Vec::new();
         while let Some(chunk) = response.chunk().await.expect("Couldn't get next chunk") {
-            file.write(&chunk).expect("Couldn't write to file");
+            for byte in &chunk {
+                if meta_interval != 0 {
+                    if awaiting_metadata_size {
+                        awaiting_metadata_size = false;
+                        metadata_size = *byte * 16;
+                        if metadata_size == 0 {
+                            counter = meta_interval;
+                        } else {
+                            awaiting_metadata = true;
+                        }
+                    } else if awaiting_metadata {
+                        metadata.push(*byte);
+                        metadata_size = metadata_size.saturating_sub(1);
+                        if metadata_size == 0 {
+                            awaiting_metadata = false;
+                            let metadata_string = std::str::from_utf8(&metadata).unwrap_or("");
+                            if !metadata_string.is_empty() {
+                                match (metadata_string.find("'"), metadata_string.rfind("'")) {
+                                    (Some(left_index), Some(right_index)) => {
+                                        let trimmed_song_title = &metadata_string[(left_index + 1)..right_index];
+                                        let mut song_title = SONG_TITLE.lock().expect("Couldn't lock SONG_TITLE");
+                                        *song_title = Some(trimmed_song_title.to_owned());
+                                    },
+                                    _ => {},
+                                }
+                            }
+                            metadata.clear();
+                            counter = meta_interval;
+                        }
+                    } else {
+                        file.write(&[*byte]).expect("Couldn't write to file");
+                        counter = counter.saturating_sub(1);
+                        if counter == 0 {
+                            awaiting_metadata_size = true;
+                        }
+                    }
+                } else {
+                    file.write(&[*byte]).expect("Couldn't write to file");
+                }
+            }
             if let Ok(message) = receiver.try_recv() {
                 match message {
                     SinkCommands::Start(new_name, new_url) => {
@@ -253,6 +308,8 @@ async fn start_ratio(receiver: Receiver<SinkCommands>, name: String, url: String
                         }
                         name = new_name;
                         url = new_url;
+                        let mut song_title = SONG_TITLE.lock().expect("Couldn't lock SONG_TITLE");
+                        *song_title = None;
                         count_down = CHUNKS_BEFORE_START;
                         should_restart = true;
                         break;
@@ -307,6 +364,6 @@ fn create_station(name: String, url: String) {
 #[tokio::main]
 async fn main() {
     let mut app_options = NativeOptions::default();
-    app_options.initial_window_size = Some(Vec2::new(256.0, 256.));
+    app_options.initial_window_size = Some(Vec2::new(320.0, 128.0));
     run_native("Radio Rust", app_options, Box::new(|_cc| Box::new(Radio::default())));
 }
