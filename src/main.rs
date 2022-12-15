@@ -16,12 +16,14 @@ use rodio::{Decoder, OutputStream, Sink};
 const CHUNKS_BEFORE_START: u8 = 10;
 
 lazy_static! {
-    static ref SINK_SENDER: Arc<Mutex<Option<Sender<SinkCommands>>>> = Arc::new(Mutex::new(None));
+    static ref OUTER_SINK_SENDER: Arc<Mutex<Option<Sender<SinkCommands>>>> = Arc::new(Mutex::new(None));
+    static ref INNER_SINK_SENDER: Arc<Mutex<Option<Sender<SinkCommands>>>> = Arc::new(Mutex::new(None));
     static ref SONG_TITLE: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 }
 
 enum SinkCommands {
     Start(String, String),
+    Volume(f32),
     Play,
     Pause,
     Quit,
@@ -29,6 +31,7 @@ enum SinkCommands {
 
 struct Radio {
     is_playing: bool,
+    volume: f32,
     current_station: Option<String>,
     is_creation_visible: bool,
     creation_name: String,
@@ -39,6 +42,7 @@ impl Default for Radio {
     fn default() -> Self {
         Radio {
             is_playing: false,
+            volume: 1.0,
             current_station: None,
             is_creation_visible: false,
             creation_name: String::from("Enter Station Name"),
@@ -52,7 +56,7 @@ impl App for Radio {
         CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered_justified(|ui| {
                 if ui.button(if self.is_playing { "Pause" } else { "Play" }).clicked() {
-                    let sink_sender = SINK_SENDER.lock().expect("Couldn't lock SINK_SENDER");
+                    let sink_sender = OUTER_SINK_SENDER.lock().expect("Couldn't lock SINK_SENDER");
                     if let Some(sender) = &*sink_sender {
                         if self.is_playing {
                             match sender.send(SinkCommands::Pause) {
@@ -64,6 +68,13 @@ impl App for Radio {
                             }
                         }
                         self.is_playing = !self.is_playing;
+                    }
+                }
+                ui.add(eframe::egui::Slider::new(&mut self.volume, 0.0..=2.0).text("Volume"));
+                {
+                    let inner_sink_sender = INNER_SINK_SENDER.lock().expect("Couldn't lock SINK_SENDER");
+                    if let Some(sender) = &*inner_sink_sender {
+                        sender.send(SinkCommands::Volume(self.volume)).unwrap();
                     }
                 }
                 ui.label(match &self.current_station {
@@ -114,7 +125,7 @@ impl App for Radio {
                     if ui.button(title.clone()).clicked() {
                         let title = title.clone();
                         let station = playlist_element.path.clone();
-                        let mut sink_sender = SINK_SENDER.lock().expect("Couldn't lock SINK_SENDER");
+                        let mut sink_sender = OUTER_SINK_SENDER.lock().expect("Couldn't lock SINK_SENDER");
                         match &*sink_sender {
                             Some(sender) => {
                                 match sender.send(SinkCommands::Start(title.clone(), station)) {
@@ -139,7 +150,7 @@ impl App for Radio {
     }
 
     fn on_close_event(&mut self) -> bool {
-        let mut sink_sender = SINK_SENDER.lock().expect("Couldn't lock SINK_SENDER");
+        let mut sink_sender = OUTER_SINK_SENDER.lock().expect("Couldn't lock SINK_SENDER");
         if let Some(sender) = &*sink_sender {
             sender.send(SinkCommands::Quit).unwrap();
         }
@@ -223,6 +234,11 @@ async fn start_ratio(receiver: Receiver<SinkCommands>, name: String, url: String
                         sink.play();
                         sink.append(source);
                     },
+                    SinkCommands::Volume(new_volume) => {
+                        if new_volume != sink.volume() {
+                            sink.set_volume(new_volume);
+                        }
+                    },
                     SinkCommands::Play => {
                         sink.play();
                     },
@@ -236,6 +252,11 @@ async fn start_ratio(receiver: Receiver<SinkCommands>, name: String, url: String
             }
         }
     });
+
+    {
+        let mut inner_sink_sender = INNER_SINK_SENDER.lock().expect("Couldn't lock INNER_SINK_SENDER");
+        *inner_sink_sender = Some(sink_sender);
+    }
 
     let mut name = name.to_lowercase().replace(" ", "_");
     let mut url = url;
@@ -312,21 +333,32 @@ async fn start_ratio(receiver: Receiver<SinkCommands>, name: String, url: String
                         *song_title = None;
                         count_down = CHUNKS_BEFORE_START;
                         should_restart = true;
+                        let inner_sink_sender = INNER_SINK_SENDER.lock().expect("Couldn't lock INNER_SINK_SENDER");
+                        if let Some(sink_sender) = &*inner_sink_sender {
+                            sink_sender.send(SinkCommands::Pause).unwrap();
+                        }
                         break;
                     },
                     SinkCommands::Quit => {
-                        sink_sender.send(message).unwrap();
+                        let inner_sink_sender = INNER_SINK_SENDER.lock().expect("Couldn't lock INNER_SINK_SENDER");
+                        if let Some(sink_sender) = &*inner_sink_sender {
+                            sink_sender.send(message).unwrap();
+                        }
                         return;
                     },
                     _ => {
-                        sink_sender.send(message).unwrap();
+                        let inner_sink_sender = INNER_SINK_SENDER.lock().expect("Couldn't lock INNER_SINK_SENDER");
+                        if let Some(sink_sender) = &*inner_sink_sender {
+                            sink_sender.send(message).unwrap();
+                        }
                     },
                 }
             }
             if should_restart {
                 if count_down == 0 {
-                    match sink_sender.send(SinkCommands::Start(name.clone(), url.clone())) {
-                        _ => {},
+                    let inner_sink_sender = INNER_SINK_SENDER.lock().expect("Couldn't lock INNER_SINK_SENDER");
+                    if let Some(sink_sender) = &*inner_sink_sender {
+                        sink_sender.send(SinkCommands::Start(name.clone(), url.clone())).unwrap();
                     }
                     should_restart = false;
                 } else {
