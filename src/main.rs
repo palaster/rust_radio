@@ -56,25 +56,40 @@ impl App for Radio {
         CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered_justified(|ui| {
                 if ui.button(if self.is_playing { "Pause" } else { "Play" }).clicked() {
-                    let sink_sender = OUTER_SINK_SENDER.lock().expect("Couldn't lock SINK_SENDER");
-                    if let Some(sender) = &*sink_sender {
+                    let mut outer_sink_sender = OUTER_SINK_SENDER.lock().expect("Couldn't lock SINK_SENDER");
+                    if let Some(sender) = &*outer_sink_sender {
                         if self.is_playing {
                             match sender.send(SinkCommands::Pause) {
-                                _ => {},
+                                Err(_) => {
+                                    self.is_playing = false;
+                                    *outer_sink_sender = None;
+                                },
+                                _ => {
+                                    self.is_playing = false;
+                                },
                             }
                         } else {
                             match sender.send(SinkCommands::Play) {
-                                _ => {},
+                                Err(_) => {
+                                    self.is_playing = false;
+                                    *outer_sink_sender = None;
+                                },
+                                _ => {
+                                    self.is_playing = true;
+                                },
                             }
                         }
-                        self.is_playing = !self.is_playing;
+                    } else {
+                        self.is_playing = false;
                     }
                 }
                 ui.add(eframe::egui::Slider::new(&mut self.volume, 0.0..=2.0).text("Volume"));
                 {
                     let inner_sink_sender = INNER_SINK_SENDER.lock().expect("Couldn't lock SINK_SENDER");
                     if let Some(sender) = &*inner_sink_sender {
-                        sender.send(SinkCommands::Volume(self.volume)).unwrap();
+                        match sender.send(SinkCommands::Volume(self.volume)) {
+                            _ => {},
+                        }
                     }
                 }
                 ui.label(match &self.current_station {
@@ -87,8 +102,8 @@ impl App for Radio {
                 });
                 {
                     let song_title = SONG_TITLE.lock().expect("Couldn't lock SONG_TITLE");
-                    if song_title.is_some() {
-                        ui.label(format!("Current Song: {}", song_title.clone().expect("")));
+                    if let Some(title) = &*song_title {
+                        ui.label(format!("{}", title));
                     }
                 }
                 if self.is_creation_visible {
@@ -115,7 +130,7 @@ impl App for Radio {
                 for station in get_stations() {
                     if station.len() != 1 {
                         println!("Only for use with streams");
-                        break;
+                        continue;
                     }
                     let playlist_element = station[0].clone();
                     let title = match playlist_element.title {
@@ -128,7 +143,16 @@ impl App for Radio {
                         let mut sink_sender = OUTER_SINK_SENDER.lock().expect("Couldn't lock SINK_SENDER");
                         match &*sink_sender {
                             Some(sender) => {
-                                match sender.send(SinkCommands::Start(title.clone(), station)) {
+                                match sender.send(SinkCommands::Start(title.clone(), station.clone())) {
+                                    Err(_) => {
+                                        let (sender, receiver) = mpsc::channel();
+                                        let title_clone = title.clone();
+                                        let station_clone = station.clone();
+                                        tokio::spawn(async move {
+                                            start_ratio(receiver, title_clone, station_clone).await;
+                                        });
+                                        *sink_sender = Some(sender);
+                                    },
                                     _ => {},
                                 }
                             },
@@ -143,16 +167,26 @@ impl App for Radio {
                         }
                         self.is_playing = true;
                         self.current_station = Some(title);
+                        let mut song_title = SONG_TITLE.lock().expect("Couldn't lock SONG_TITLE");
+                        *song_title = None;
                     }
                 }
             });
         });
+        if self.is_playing {
+            let outer_sink_sender = OUTER_SINK_SENDER.lock().expect("Couldn't lock OUTER_SINK_SENDER");
+            if let None = &*outer_sink_sender {
+                self.is_playing = false;
+            }
+        }
     }
 
     fn on_close_event(&mut self) -> bool {
-        let mut sink_sender = OUTER_SINK_SENDER.lock().expect("Couldn't lock SINK_SENDER");
+        let mut sink_sender = OUTER_SINK_SENDER.lock().expect("Couldn't lock OUTER_SINK_SENDER");
         if let Some(sender) = &*sink_sender {
-            sender.send(SinkCommands::Quit).unwrap();
+            match sender.send(SinkCommands::Quit) {
+                _ => {},
+            }
         }
         *sink_sender = None;
         true
@@ -269,7 +303,55 @@ async fn start_ratio(receiver: Receiver<SinkCommands>, name: String, url: String
         let mut file = File::create(path).expect(&format!("Couldn't create file {}", &name));
 
         let client = reqwest::Client::new();
-        let mut response = client.get(&url).header("icy-metadata", "1").send().await.expect("Couldn't get response");
+        let mut response = match client.get(&url).header("icy-metadata", "1").send().await {
+            Ok(t) => t,
+            _ => {
+                let mut inner_sink_sender = INNER_SINK_SENDER.lock().expect("Couldn't lock INNER_SINK_SENDER");
+                if let Some(sink_sender) = &*inner_sink_sender {
+                    match sink_sender.send(SinkCommands::Quit) {
+                        _ => {},
+                    }
+                }
+                *inner_sink_sender = None;
+                let mut outer_sink_sender = OUTER_SINK_SENDER.lock().expect("Couldn't lock OUTER_SINK_SENDER");
+                *outer_sink_sender = None;
+                let mut song_title = SONG_TITLE.lock().expect("Couldn't lock SONG_TITLE");
+                *song_title = Some(String::from("Error Please Try Again"));
+                return;
+            },
+        };
+        match response.headers().get("content-type") {
+            Some(t) => {
+                if t.to_str().unwrap_or_default() != "audio/mpeg" {
+                    let mut inner_sink_sender = INNER_SINK_SENDER.lock().expect("Couldn't lock INNER_SINK_SENDER");
+                    if let Some(sink_sender) = &*inner_sink_sender {
+                        match sink_sender.send(SinkCommands::Quit) {
+                            _ => {},
+                        }
+                    }
+                    *inner_sink_sender = None;
+                    let mut outer_sink_sender = OUTER_SINK_SENDER.lock().expect("Couldn't lock OUTER_SINK_SENDER");
+                    *outer_sink_sender = None;
+                    let mut song_title = SONG_TITLE.lock().expect("Couldn't lock SONG_TITLE");
+                    *song_title = Some(String::from("Error Please Try Again"));
+                    return;
+                }
+            },
+            _ => {
+                let mut inner_sink_sender = INNER_SINK_SENDER.lock().expect("Couldn't lock INNER_SINK_SENDER");
+                if let Some(sink_sender) = &*inner_sink_sender {
+                    match sink_sender.send(SinkCommands::Quit) {
+                        _ => {},
+                    }                    
+                }
+                *inner_sink_sender = None;
+                let mut outer_sink_sender = OUTER_SINK_SENDER.lock().expect("Couldn't lock OUTER_SINK_SENDER");
+                *outer_sink_sender = None;
+                let mut song_title = SONG_TITLE.lock().expect("Couldn't lock SONG_TITLE");
+                *song_title = Some(String::from("Error Please Try Again"));
+                return;
+            },
+        }
         let meta_interval: usize = match response.headers().get("icy-metaint") {
             Some(t) => t.to_str().unwrap_or_default().parse().unwrap_or_default(),
             _ => 0,
@@ -297,13 +379,21 @@ async fn start_ratio(receiver: Receiver<SinkCommands>, name: String, url: String
                             awaiting_metadata = false;
                             let metadata_string = std::str::from_utf8(&metadata).unwrap_or("");
                             if !metadata_string.is_empty() {
-                                match (metadata_string.find("'"), metadata_string.rfind("'")) {
-                                    (Some(left_index), Some(right_index)) => {
-                                        let trimmed_song_title = &metadata_string[(left_index + 1)..right_index];
-                                        let mut song_title = SONG_TITLE.lock().expect("Couldn't lock SONG_TITLE");
-                                        *song_title = Some(trimmed_song_title.to_owned());
+                                const STREAM_TITLE_KEYWORD: &str = "StreamTitle='";
+                                match metadata_string.find(STREAM_TITLE_KEYWORD) {
+                                    Some(index) => {
+                                        let left_index = index + 13;
+                                        let stream_title_substring = &metadata_string[left_index..];
+                                        match stream_title_substring.find("'") {
+                                            Some(right_index) => {
+                                                let trimmed_song_title = &stream_title_substring[..right_index];
+                                                let mut song_title = SONG_TITLE.lock().expect("Couldn't lock SONG_TITLE");
+                                                *song_title = Some(format!("Current Song: {}", trimmed_song_title.to_owned()));
+                                            },
+                                            _ => {},
+                                        }
                                     },
-                                    _ => {},
+                                    None => {},
                                 }
                             }
                             metadata.clear();
