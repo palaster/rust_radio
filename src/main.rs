@@ -87,9 +87,7 @@ impl App for Radio {
                 {
                     let inner_sink_sender = INNER_SINK_SENDER.lock().expect("Couldn't lock SINK_SENDER");
                     if let Some(sender) = &*inner_sink_sender {
-                        match sender.send(SinkCommands::Volume(self.volume)) {
-                            _ => {},
-                        }
+                        if sender.send(SinkCommands::Volume(self.volume)).is_err() {}
                     }
                 }
                 ui.label(match &self.current_station {
@@ -103,29 +101,25 @@ impl App for Radio {
                 {
                     let song_title = SONG_TITLE.lock().expect("Couldn't lock SONG_TITLE");
                     if let Some(title) = &*song_title {
-                        ui.label(format!("{}", title));
+                        ui.label(title.to_string());
                     }
                 }
                 if self.is_creation_visible {
                     ui.text_edit_singleline(&mut self.creation_name);
                     ui.text_edit_singleline(&mut self.creation_url);
-                    if ui.button("Create Station").clicked() {
-                        if !self.creation_name.is_empty() && !self.creation_url.is_empty() {
-                            create_station(self.creation_name.clone(), self.creation_url.clone());
-                            self.is_creation_visible = false;
-                            self.creation_name = String::from("Enter Station Name");
-                            self.creation_url = String::from("Enter Station URL");
-                        }
+                    if ui.button("Create Station").clicked() && !self.creation_name.is_empty() && !self.creation_url.is_empty() {
+                        create_station(self.creation_name.clone(), self.creation_url.clone());
+                        self.is_creation_visible = false;
+                        self.creation_name = String::from("Enter Station Name");
+                        self.creation_url = String::from("Enter Station URL");
                     }
                     if ui.button("Cancel").clicked() {
                         self.is_creation_visible = false;
                         self.creation_name = String::from("Enter Station Name");
                         self.creation_url = String::from("Enter Station URL");
                     }
-                } else {
-                    if ui.button("Create New Station").clicked() {
-                        self.is_creation_visible = true;
-                    }
+                } else if ui.button("Create New Station").clicked() {
+                    self.is_creation_visible = true;
                 }
                 for station in get_stations() {
                     if station.len() != 1 {
@@ -143,17 +137,14 @@ impl App for Radio {
                         let mut sink_sender = OUTER_SINK_SENDER.lock().expect("Couldn't lock SINK_SENDER");
                         match &*sink_sender {
                             Some(sender) => {
-                                match sender.send(SinkCommands::Start(title.clone(), station.clone())) {
-                                    Err(_) => {
-                                        let (sender, receiver) = mpsc::channel();
-                                        let title_clone = title.clone();
-                                        let station_clone = station.clone();
-                                        tokio::spawn(async move {
-                                            start_ratio(receiver, title_clone, station_clone).await;
-                                        });
-                                        *sink_sender = Some(sender);
-                                    },
-                                    _ => {},
+                                if sender.send(SinkCommands::Start(title.clone(), station.clone())).is_err() {
+                                    let (sender, receiver) = mpsc::channel();
+                                    let title_clone = title.clone();
+                                    let station_clone = station.clone();
+                                    tokio::spawn(async move {
+                                        start_ratio(receiver, title_clone, station_clone).await;
+                                    });
+                                    *sink_sender = Some(sender);
                                 }
                             },
                             None => {
@@ -175,7 +166,7 @@ impl App for Radio {
         });
         if self.is_playing {
             let outer_sink_sender = OUTER_SINK_SENDER.lock().expect("Couldn't lock OUTER_SINK_SENDER");
-            if let None = &*outer_sink_sender {
+            if outer_sink_sender.is_none() {
                 self.is_playing = false;
             }
         }
@@ -184,9 +175,7 @@ impl App for Radio {
     fn on_close_event(&mut self) -> bool {
         let mut sink_sender = OUTER_SINK_SENDER.lock().expect("Couldn't lock OUTER_SINK_SENDER");
         if let Some(sender) = &*sink_sender {
-            match sender.send(SinkCommands::Quit) {
-                _ => {},
-            }
+            if sender.send(SinkCommands::Quit).is_err() {}
         }
         *sink_sender = None;
         true
@@ -196,10 +185,8 @@ impl App for Radio {
 fn get_stations() -> Vec<Vec<PlaylistElement>> {
     let mut audio_dir = dirs::audio_dir().expect("Couldn't get audio_dir");
     audio_dir.push("rust_radio");
-    if !audio_dir.exists() {
-        if let Err(_) = fs::create_dir(&audio_dir) {
-            println!("Couldn't create rust_radio directory maybe because it exists");
-        }
+    if !audio_dir.exists() && fs::create_dir(&audio_dir).is_err() {
+        println!("Couldn't create rust_radio directory maybe because it exists");
     }
     if !audio_dir.exists() {
         panic!("Couldn't create rust_radio directory");
@@ -208,13 +195,11 @@ fn get_stations() -> Vec<Vec<PlaylistElement>> {
     let mut stations: Vec<Vec<PlaylistElement>> = Vec::new();
 
     if let Ok(entries) = fs::read_dir(&audio_dir) {
-        for entry in entries {
-            if let Ok(entry) = entry {
-                if entry.file_type().expect("Couldn't get entry file type").is_file() {
-                    if let Ok(file_name_as_string) = entry.file_name().into_string() {
-                        if file_name_as_string.ends_with(".pls") {
-                            stations.push(pls::parse(&mut File::open(entry.path()).expect("Couldn't open file")).expect("Couldn't parse playlist"));
-                        }
+        for entry in entries.flatten() {
+            if entry.file_type().expect("Couldn't get entry file type").is_file() {
+                if let Ok(file_name_as_string) = entry.file_name().into_string() {
+                    if file_name_as_string.ends_with(".pls") {
+                        stations.push(pls::parse(&mut File::open(entry.path()).expect("Couldn't open file")).expect("Couldn't parse playlist"));
                     }
                 }
             }
@@ -243,9 +228,7 @@ async fn start_ratio(receiver: Receiver<SinkCommands>, name: String, url: String
                             _ => { continue; },
                         };
                         if let Some(old_path) = path {
-                            match fs::remove_file(old_path) {
-                                _ => {},
-                            }
+                            if fs::remove_file(old_path).is_err() {}
                         }
                         path = None;
                         let mut new_path = std::env::temp_dir();
@@ -292,7 +275,7 @@ async fn start_ratio(receiver: Receiver<SinkCommands>, name: String, url: String
         *inner_sink_sender = Some(sink_sender);
     }
 
-    let mut name = name.to_lowercase().replace(" ", "_");
+    let mut name = name.to_lowercase().replace(' ', "_");
     let mut url = url;
     let mut count_down = CHUNKS_BEFORE_START;
     let mut should_restart = true;
@@ -300,7 +283,7 @@ async fn start_ratio(receiver: Receiver<SinkCommands>, name: String, url: String
     loop {
         let mut path = std::env::temp_dir();
         path.push(&name);
-        let mut file = File::create(path).expect(&format!("Couldn't create file {}", &name));
+        let mut file = File::create(path).unwrap_or_else(|_| panic!("Couldn't create file {}", &name));
 
         let client = reqwest::Client::new();
         let mut response = match client.get(&url).header("icy-metadata", "1").send().await {
@@ -308,9 +291,7 @@ async fn start_ratio(receiver: Receiver<SinkCommands>, name: String, url: String
             _ => {
                 let mut inner_sink_sender = INNER_SINK_SENDER.lock().expect("Couldn't lock INNER_SINK_SENDER");
                 if let Some(sink_sender) = &*inner_sink_sender {
-                    match sink_sender.send(SinkCommands::Quit) {
-                        _ => {},
-                    }
+                    if sink_sender.send(SinkCommands::Quit).is_err() {}
                 }
                 *inner_sink_sender = None;
                 let mut outer_sink_sender = OUTER_SINK_SENDER.lock().expect("Couldn't lock OUTER_SINK_SENDER");
@@ -325,9 +306,7 @@ async fn start_ratio(receiver: Receiver<SinkCommands>, name: String, url: String
                 if t.to_str().unwrap_or_default() != "audio/mpeg" {
                     let mut inner_sink_sender = INNER_SINK_SENDER.lock().expect("Couldn't lock INNER_SINK_SENDER");
                     if let Some(sink_sender) = &*inner_sink_sender {
-                        match sink_sender.send(SinkCommands::Quit) {
-                            _ => {},
-                        }
+                        if sink_sender.send(SinkCommands::Quit).is_err() {}
                     }
                     *inner_sink_sender = None;
                     let mut outer_sink_sender = OUTER_SINK_SENDER.lock().expect("Couldn't lock OUTER_SINK_SENDER");
@@ -340,9 +319,7 @@ async fn start_ratio(receiver: Receiver<SinkCommands>, name: String, url: String
             _ => {
                 let mut inner_sink_sender = INNER_SINK_SENDER.lock().expect("Couldn't lock INNER_SINK_SENDER");
                 if let Some(sink_sender) = &*inner_sink_sender {
-                    match sink_sender.send(SinkCommands::Quit) {
-                        _ => {},
-                    }                    
+                    if sink_sender.send(SinkCommands::Quit).is_err() {}
                 }
                 *inner_sink_sender = None;
                 let mut outer_sink_sender = OUTER_SINK_SENDER.lock().expect("Couldn't lock OUTER_SINK_SENDER");
@@ -380,40 +357,34 @@ async fn start_ratio(receiver: Receiver<SinkCommands>, name: String, url: String
                             let metadata_string = std::str::from_utf8(&metadata).unwrap_or("");
                             if !metadata_string.is_empty() {
                                 const STREAM_TITLE_KEYWORD: &str = "StreamTitle='";
-                                match metadata_string.find(STREAM_TITLE_KEYWORD) {
-                                    Some(index) => {
-                                        let left_index = index + 13;
-                                        let stream_title_substring = &metadata_string[left_index..];
-                                        match stream_title_substring.find("'") {
-                                            Some(right_index) => {
-                                                let trimmed_song_title = &stream_title_substring[..right_index];
-                                                let mut song_title = SONG_TITLE.lock().expect("Couldn't lock SONG_TITLE");
-                                                *song_title = Some(format!("Current Song: {}", trimmed_song_title.to_owned()));
-                                            },
-                                            _ => {},
-                                        }
-                                    },
-                                    None => {},
+                                if let Some(index) = metadata_string.find(STREAM_TITLE_KEYWORD) {
+                                    let left_index = index + 13;
+                                    let stream_title_substring = &metadata_string[left_index..];
+                                    if let Some(right_index) = stream_title_substring.find('\'') {
+                                        let trimmed_song_title = &stream_title_substring[..right_index];
+                                        let mut song_title = SONG_TITLE.lock().expect("Couldn't lock SONG_TITLE");
+                                        *song_title = Some(format!("Current Song: {}", trimmed_song_title.to_owned()));
+                                    }
                                 }
                             }
                             metadata.clear();
                             counter = meta_interval;
                         }
                     } else {
-                        file.write(&[*byte]).expect("Couldn't write to file");
+                        file.write_all(&[*byte]).expect("Couldn't write to file");
                         counter = counter.saturating_sub(1);
                         if counter == 0 {
                             awaiting_metadata_size = true;
                         }
                     }
                 } else {
-                    file.write(&[*byte]).expect("Couldn't write to file");
+                    file.write_all(&[*byte]).expect("Couldn't write to file");
                 }
             }
             if let Ok(message) = receiver.try_recv() {
                 match message {
                     SinkCommands::Start(new_name, new_url) => {
-                        let new_name = new_name.to_lowercase().replace(" ", "_");
+                        let new_name = new_name.to_lowercase().replace(' ', "_");
                         if name == new_name && url == new_url {
                             continue;
                         }
@@ -462,21 +433,19 @@ async fn start_ratio(receiver: Receiver<SinkCommands>, name: String, url: String
 fn create_station(name: String, url: String) {
     let mut audio_dir = dirs::audio_dir().expect("Couldn't get audio_dir");
     audio_dir.push("rust_radio");
-    if !audio_dir.exists() {
-        if let Err(_) = fs::create_dir(&audio_dir) {
-            println!("Couldn't create rust_radio directory maybe because it exists");
-        }
+    if !audio_dir.exists() && fs::create_dir(&audio_dir).is_err() {
+        println!("Couldn't create rust_radio directory maybe because it exists");
     }
     if !audio_dir.exists() {
         panic!("Couldn't create rust_radio directory");
     }
 
-    audio_dir.push(name.to_lowercase().replace(" ", "_") + ".pls");
+    audio_dir.push(name.to_lowercase().replace(' ', "_") + ".pls");
 
     pls::write(
         &[PlaylistElement {
             path: url,
-            title: Some(name.clone()),
+            title: Some(name),
             len:  pls::ElementLength::Unknown,
         }],
         &mut File::create(audio_dir).expect("Couldn't create station file")
@@ -485,7 +454,6 @@ fn create_station(name: String, url: String) {
 
 #[tokio::main]
 async fn main() {
-    let mut app_options = NativeOptions::default();
-    app_options.initial_window_size = Some(Vec2::new(320.0, 128.0));
-    run_native("Radio Rust", app_options, Box::new(|_cc| Box::new(Radio::default())));
+    let app_options = NativeOptions { initial_window_size: Some(Vec2::new(320.0, 128.0)), ..Default::default() };
+    run_native("Radio Rust", app_options, Box::new(|_cc| Box::<Radio>::default()));
 }
