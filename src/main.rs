@@ -1,27 +1,23 @@
-#[macro_use]
-extern crate lazy_static;
-
 use eframe::egui::{CentralPanel};
 use eframe::epaint::Vec2;
 use eframe::{App, run_native, NativeOptions};
 
+use once_cell::sync::Lazy;
 use pls::PlaylistElement;
 
 use std::fs::{self, File};
 use std::io::{Write};
-use std::sync::{mpsc::{self, Receiver, Sender}, Arc, Mutex};
+use std::sync::{mpsc::{self, Receiver, Sender}, Mutex};
 
 use rodio::{Decoder, OutputStream, Sink};
 
 const CHUNKS_BEFORE_START: u8 = 10;
 
-lazy_static! {
-    static ref OUTER_SINK_SENDER: Arc<Mutex<Option<Sender<SinkCommands>>>> = Arc::new(Mutex::new(None));
-    static ref INNER_SINK_SENDER: Arc<Mutex<Option<Sender<SinkCommands>>>> = Arc::new(Mutex::new(None));
-    static ref SONG_TITLE: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-}
+static INNER_SINK_SENDER: Lazy<Mutex<Option<Sender<SinkCommands>>>> = Lazy::new(|| Mutex::new(None));
+static SONG_TITLE: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
 
 enum SinkCommands {
+    None,
     Start(String, String),
     Volume(f32),
     Play,
@@ -33,6 +29,7 @@ struct Radio {
     is_playing: bool,
     volume: f32,
     current_station: Option<String>,
+    outer_sink_sender: Option<Sender<SinkCommands>>,
     is_creation_visible: bool,
     creation_name: String,
     creation_url: String,
@@ -44,6 +41,7 @@ impl Default for Radio {
             is_playing: false,
             volume: 1.0,
             current_station: None,
+            outer_sink_sender: None,
             is_creation_visible: false,
             creation_name: String::from("Enter Station Name"),
             creation_url: String::from("Enter Station URL"),
@@ -56,28 +54,19 @@ impl App for Radio {
         CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered_justified(|ui| {
                 if ui.button(if self.is_playing { "Pause" } else { "Play" }).clicked() {
-                    let mut outer_sink_sender = OUTER_SINK_SENDER.lock().expect("Couldn't lock SINK_SENDER");
-                    if let Some(sender) = &*outer_sink_sender {
+                    if let Some(sender) = &self.outer_sink_sender {
                         if self.is_playing {
-                            match sender.send(SinkCommands::Pause) {
-                                Err(_) => {
-                                    self.is_playing = false;
-                                    *outer_sink_sender = None;
-                                },
-                                _ => {
-                                    self.is_playing = false;
-                                },
+                            if sender.send(SinkCommands::Pause).is_err() {
+                                self.is_playing = false;
+                                self.outer_sink_sender = None;
+                            } else {
+                                self.is_playing = false;
                             }
+                        } else if sender.send(SinkCommands::Play).is_err() {
+                            self.is_playing = false;
+                            self.outer_sink_sender = None;
                         } else {
-                            match sender.send(SinkCommands::Play) {
-                                Err(_) => {
-                                    self.is_playing = false;
-                                    *outer_sink_sender = None;
-                                },
-                                _ => {
-                                    self.is_playing = true;
-                                },
-                            }
+                            self.is_playing = true;
                         }
                     } else {
                         self.is_playing = false;
@@ -134,8 +123,7 @@ impl App for Radio {
                     if ui.button(title.clone()).clicked() {
                         let title = title.clone();
                         let station = playlist_element.path.clone();
-                        let mut sink_sender = OUTER_SINK_SENDER.lock().expect("Couldn't lock SINK_SENDER");
-                        match &*sink_sender {
+                        match &self.outer_sink_sender {
                             Some(sender) => {
                                 if sender.send(SinkCommands::Start(title.clone(), station.clone())).is_err() {
                                     let (sender, receiver) = mpsc::channel();
@@ -144,7 +132,7 @@ impl App for Radio {
                                     tokio::spawn(async move {
                                         start_ratio(receiver, title_clone, station_clone).await;
                                     });
-                                    *sink_sender = Some(sender);
+                                    self.outer_sink_sender = Some(sender);
                                 }
                             },
                             None => {
@@ -153,7 +141,7 @@ impl App for Radio {
                                 tokio::spawn(async move {
                                     start_ratio(receiver, title_clone, station).await;
                                 });
-                                *sink_sender = Some(sender);
+                                self.outer_sink_sender = Some(sender);
                             },
                         }
                         self.is_playing = true;
@@ -164,20 +152,23 @@ impl App for Radio {
                 }
             });
         });
-        if self.is_playing {
-            let outer_sink_sender = OUTER_SINK_SENDER.lock().expect("Couldn't lock OUTER_SINK_SENDER");
-            if outer_sink_sender.is_none() {
+        if self.is_playing && self.outer_sink_sender.is_none() {
+            if self.outer_sink_sender.is_none() {
                 self.is_playing = false;
+            } else if let Some(sender) = &self.outer_sink_sender {
+                if sender.send(SinkCommands::None).is_err() {
+                    self.outer_sink_sender = None;
+                    self.is_playing = false;
+                }
             }
         }
     }
 
     fn on_close_event(&mut self) -> bool {
-        let mut sink_sender = OUTER_SINK_SENDER.lock().expect("Couldn't lock OUTER_SINK_SENDER");
-        if let Some(sender) = &*sink_sender {
+        if let Some(sender) = &self.outer_sink_sender {
             if sender.send(SinkCommands::Quit).is_err() {}
         }
-        *sink_sender = None;
+        self.outer_sink_sender = None;
         true
     }
 }
@@ -265,6 +256,7 @@ async fn start_ratio(receiver: Receiver<SinkCommands>, name: String, url: String
                     SinkCommands::Quit => {
                         return;
                     },
+                    _ => {},
                 }
             }
         }
@@ -294,8 +286,6 @@ async fn start_ratio(receiver: Receiver<SinkCommands>, name: String, url: String
                     if sink_sender.send(SinkCommands::Quit).is_err() {}
                 }
                 *inner_sink_sender = None;
-                let mut outer_sink_sender = OUTER_SINK_SENDER.lock().expect("Couldn't lock OUTER_SINK_SENDER");
-                *outer_sink_sender = None;
                 let mut song_title = SONG_TITLE.lock().expect("Couldn't lock SONG_TITLE");
                 *song_title = Some(String::from("Error Please Try Again"));
                 return;
@@ -309,8 +299,6 @@ async fn start_ratio(receiver: Receiver<SinkCommands>, name: String, url: String
                         if sink_sender.send(SinkCommands::Quit).is_err() {}
                     }
                     *inner_sink_sender = None;
-                    let mut outer_sink_sender = OUTER_SINK_SENDER.lock().expect("Couldn't lock OUTER_SINK_SENDER");
-                    *outer_sink_sender = None;
                     let mut song_title = SONG_TITLE.lock().expect("Couldn't lock SONG_TITLE");
                     *song_title = Some(String::from("Error Please Try Again"));
                     return;
@@ -322,8 +310,6 @@ async fn start_ratio(receiver: Receiver<SinkCommands>, name: String, url: String
                     if sink_sender.send(SinkCommands::Quit).is_err() {}
                 }
                 *inner_sink_sender = None;
-                let mut outer_sink_sender = OUTER_SINK_SENDER.lock().expect("Couldn't lock OUTER_SINK_SENDER");
-                *outer_sink_sender = None;
                 let mut song_title = SONG_TITLE.lock().expect("Couldn't lock SONG_TITLE");
                 *song_title = Some(String::from("Error Please Try Again"));
                 return;
