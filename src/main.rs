@@ -79,13 +79,10 @@ impl App for Radio {
                         if sender.send(SinkCommands::Volume(self.volume)).is_err() {}
                     }
                 }
-                ui.label(match &self.current_station {
-                    Some(station_name) => {
-                        format!("Current Station: {}", station_name)
-                    },
-                    _ => {
-                        "Station Not Selected".to_string()
-                    },
+                ui.label(if let Some(station_name) = &self.current_station {
+                    format!("Current Station: {}", station_name)
+                } else {
+                    String::from("Station Not Selected")
                 });
                 {
                     let song_title = SONG_TITLE.lock().expect("Couldn't lock SONG_TITLE");
@@ -123,26 +120,23 @@ impl App for Radio {
                     if ui.button(title.clone()).clicked() {
                         let title = title.clone();
                         let station = playlist_element.path.clone();
-                        match &self.outer_sink_sender {
-                            Some(sender) => {
-                                if sender.send(SinkCommands::Start(title.clone(), station.clone())).is_err() {
-                                    let (sender, receiver) = mpsc::channel();
-                                    let title_clone = title.clone();
-                                    let station_clone = station.clone();
-                                    tokio::spawn(async move {
-                                        start_ratio(receiver, title_clone, station_clone).await;
-                                    });
-                                    self.outer_sink_sender = Some(sender);
-                                }
-                            },
-                            None => {
+                        if let Some(sender) = &self.outer_sink_sender {
+                            if sender.send(SinkCommands::Start(title.clone(), station.clone())).is_err() {
                                 let (sender, receiver) = mpsc::channel();
                                 let title_clone = title.clone();
+                                let station_clone = station.clone();
                                 tokio::spawn(async move {
-                                    start_ratio(receiver, title_clone, station).await;
+                                    start_ratio(receiver, title_clone, station_clone).await;
                                 });
                                 self.outer_sink_sender = Some(sender);
-                            },
+                            }
+                        } else {
+                            let (sender, receiver) = mpsc::channel();
+                            let title_clone = title.clone();
+                            tokio::spawn(async move {
+                                start_ratio(receiver, title_clone, station).await;
+                            });
+                            self.outer_sink_sender = Some(sender);
                         }
                         self.is_playing = true;
                         self.current_station = Some(title);
@@ -152,7 +146,7 @@ impl App for Radio {
                 }
             });
         });
-        if self.is_playing && self.outer_sink_sender.is_none() {
+        if self.is_playing {
             if self.outer_sink_sender.is_none() {
                 self.is_playing = false;
             } else if let Some(sender) = &self.outer_sink_sender {
@@ -380,32 +374,62 @@ async fn start_ratio(receiver: Receiver<SinkCommands>, name: String, url: String
                         *song_title = None;
                         count_down = CHUNKS_BEFORE_START;
                         should_restart = true;
-                        let inner_sink_sender = INNER_SINK_SENDER.lock().expect("Couldn't lock INNER_SINK_SENDER");
+                        let mut inner_sink_sender = INNER_SINK_SENDER.lock().expect("Couldn't lock INNER_SINK_SENDER");
                         if let Some(sink_sender) = &*inner_sink_sender {
-                            sink_sender.send(SinkCommands::Pause).unwrap();
+                            if sink_sender.send(SinkCommands::Pause).is_err() {
+                                *inner_sink_sender = None;
+                                let mut song_title = SONG_TITLE.lock().expect("Couldn't lock SONG_TITLE");
+                                *song_title = Some(String::from("Error Please Try Again"));
+                                return;
+                            }
+                        } else {
+                            let mut song_title = SONG_TITLE.lock().expect("Couldn't lock SONG_TITLE");
+                            *song_title = Some(String::from("Error Please Try Again"));
+                            return;
                         }
                         break;
                     },
                     SinkCommands::Quit => {
-                        let inner_sink_sender = INNER_SINK_SENDER.lock().expect("Couldn't lock INNER_SINK_SENDER");
+                        let mut inner_sink_sender = INNER_SINK_SENDER.lock().expect("Couldn't lock INNER_SINK_SENDER");
                         if let Some(sink_sender) = &*inner_sink_sender {
-                            sink_sender.send(message).unwrap();
+                            if sink_sender.send(message).is_err() { }
                         }
+                        *inner_sink_sender = None;
+                        let mut song_title = SONG_TITLE.lock().expect("Couldn't lock SONG_TITLE");
+                        *song_title = Some(String::from("Error Please Try Again"));
                         return;
                     },
                     _ => {
-                        let inner_sink_sender = INNER_SINK_SENDER.lock().expect("Couldn't lock INNER_SINK_SENDER");
+                        let mut inner_sink_sender = INNER_SINK_SENDER.lock().expect("Couldn't lock INNER_SINK_SENDER");
                         if let Some(sink_sender) = &*inner_sink_sender {
-                            sink_sender.send(message).unwrap();
+                            if sink_sender.send(message).is_err() {
+                                *inner_sink_sender = None;
+                                let mut song_title = SONG_TITLE.lock().expect("Couldn't lock SONG_TITLE");
+                                *song_title = Some(String::from("Error Please Try Again"));
+                                return;
+                            }
+                        } else {
+                            let mut song_title = SONG_TITLE.lock().expect("Couldn't lock SONG_TITLE");
+                            *song_title = Some(String::from("Error Please Try Again"));
+                            return;
                         }
                     },
                 }
             }
             if should_restart {
                 if count_down == 0 {
-                    let inner_sink_sender = INNER_SINK_SENDER.lock().expect("Couldn't lock INNER_SINK_SENDER");
+                    let mut inner_sink_sender = INNER_SINK_SENDER.lock().expect("Couldn't lock INNER_SINK_SENDER");
                     if let Some(sink_sender) = &*inner_sink_sender {
-                        sink_sender.send(SinkCommands::Start(name.clone(), url.clone())).unwrap();
+                        if sink_sender.send(SinkCommands::Start(name.clone(), url.clone())).is_err() {
+                            *inner_sink_sender = None;
+                            let mut song_title = SONG_TITLE.lock().expect("Couldn't lock SONG_TITLE");
+                            *song_title = Some(String::from("Error Please Try Again"));
+                            return;
+                        }
+                    } else {
+                        let mut song_title = SONG_TITLE.lock().expect("Couldn't lock SONG_TITLE");
+                        *song_title = Some(String::from("Error Please Try Again"));
+                        return;
                     }
                     should_restart = false;
                 } else {
