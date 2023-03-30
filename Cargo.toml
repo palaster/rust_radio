@@ -2,7 +2,16 @@
 name = "rust_radio"
 version = "1.0.0"
 authors = ["Pat Laster <palaster307@gmail.com>"]
+description = """
+Radio Rust is minimalist rust based Internet Radio Player using eframe, Reqwest, and Rodio
+"""
+documentation = "https://github.com/palaster/rust_radio"
+homepage = "https://github.com/palaster/rust_radio"
+repository = "https://github.com/palaster/rust_radio"
 edition = "2021"
+readme = "README.md"
+keywords = ["audio", "internet-radio"]
+categories = ["multimedia::audio"]
 license = "AGPL-3.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
