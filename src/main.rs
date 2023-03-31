@@ -200,5 +200,5 @@ fn create_station(name: String, url: String) {
 #[tokio::main]
 async fn main() {
     let app_options = NativeOptions { initial_window_size: Some(Vec2::new(320.0, 128.0)), ..Default::default() };
-    run_native("Radio Rust", app_options, Box::new(|_cc| Box::<Radio>::default()));
+    if run_native("Radio Rust", app_options, Box::new(|_cc| Box::<Radio>::default())).is_err() {}
 }
