@@ -10,7 +10,7 @@ pub(crate) async fn input(name: String, url: String) {
     let mut count_down = CHUNKS_BEFORE_START;
     let mut should_restart = true;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder().user_agent("RadioRust/1.0.2").build().expect("Client::new()");
 
     loop {
         let mut response = match client.get(&working_url).header("icy-metadata", "1").send().await {
