@@ -1,6 +1,6 @@
 use std::{fs::File, io::Write};
 
-use crate::{OUTPUT_SENDER, SONG_TITLE, STONG_TITLE_ERROR, output::OutputCommands};
+use crate::{output::OutputCommands, OUTPUT_SENDER, SONG_TITLE, STONG_TITLE_ERROR};
 
 const CHUNKS_BEFORE_START: u8 = 20;
 
@@ -10,42 +10,62 @@ pub(crate) async fn input(name: String, url: String) {
     let mut count_down = CHUNKS_BEFORE_START;
     let mut should_restart = true;
 
-    let client = reqwest::Client::builder().user_agent("RadioRust/1.0.2").build().expect("Client::new()");
+    let client = reqwest::Client::builder()
+        .user_agent("RadioRust/1.0.2")
+        .build()
+        .expect("Client::new()");
 
     loop {
-        let mut response = match client.get(&working_url).header("icy-metadata", "1").send().await {
+        let mut response = match client
+            .get(&working_url)
+            .header("icy-metadata", "1")
+            .send()
+            .await
+        {
             Ok(t) => t,
             Err(_) => {
-                let output_sink_sender = OUTPUT_SENDER.lock().expect("Couldn't lock INNER_SINK_SENDER");
-                if output_sink_sender.send(OutputCommands::Pause).is_err() {}
+                let output_sink_sender = OUTPUT_SENDER
+                    .lock()
+                    .expect("Couldn't lock INNER_SINK_SENDER");
+                let _ = output_sink_sender.send(OutputCommands::Pause);
                 let mut song_title = SONG_TITLE.lock().expect("Couldn't lock SONG_TITLE");
                 *song_title = STONG_TITLE_ERROR.to_string();
                 return;
-            },
+            }
         };
         if let Some(header_value) = response.headers().get("content-type") {
             if header_value.to_str().unwrap_or_default() != "audio/mpeg" {
-                let output_sink_sender = OUTPUT_SENDER.lock().expect("Couldn't lock INNER_SINK_SENDER");
-                if output_sink_sender.send(OutputCommands::Pause).is_err() {}
+                let output_sink_sender = OUTPUT_SENDER
+                    .lock()
+                    .expect("Couldn't lock INNER_SINK_SENDER");
+                let _ = output_sink_sender.send(OutputCommands::Pause);
                 let mut song_title = SONG_TITLE.lock().expect("Couldn't lock SONG_TITLE");
                 *song_title = STONG_TITLE_ERROR.to_string();
                 return;
             }
         } else {
-            let output_sink_sender = OUTPUT_SENDER.lock().expect("Couldn't lock INNER_SINK_SENDER");
-            if output_sink_sender.send(OutputCommands::Pause).is_err() {}
+            let output_sink_sender = OUTPUT_SENDER
+                .lock()
+                .expect("Couldn't lock INNER_SINK_SENDER");
+            let _ = output_sink_sender.send(OutputCommands::Pause);
             let mut song_title = SONG_TITLE.lock().expect("Couldn't lock SONG_TITLE");
             *song_title = STONG_TITLE_ERROR.to_string();
             return;
         }
-        let meta_interval: usize = if let Some(header_value) = response.headers().get("icy-metaint") {
-            header_value.to_str().unwrap_or_default().parse().unwrap_or_default()
+        let meta_interval: usize = if let Some(header_value) = response.headers().get("icy-metaint")
+        {
+            header_value
+                .to_str()
+                .unwrap_or_default()
+                .parse()
+                .unwrap_or_default()
         } else {
             0
         };
         let mut path = std::env::temp_dir();
         path.push(&working_name);
-        let mut file = File::create(path).unwrap_or_else(|_| panic!("Couldn't create file {}", &working_name));
+        let mut file =
+            File::create(path).unwrap_or_else(|_| panic!("Couldn't create file {}", &working_name));
         let mut counter = meta_interval;
         let mut awaiting_metadata_size = false;
         let mut metadata_size: u8 = 0;
@@ -74,9 +94,12 @@ pub(crate) async fn input(name: String, url: String) {
                                     let left_index = index + 13;
                                     let stream_title_substring = &metadata_string[left_index..];
                                     if let Some(right_index) = stream_title_substring.find('\'') {
-                                        let trimmed_song_title = &stream_title_substring[..right_index];
-                                        let mut song_title = SONG_TITLE.lock().expect("Couldn't lock SONG_TITLE");
-                                        *song_title = format!("Current Song: {}", trimmed_song_title);
+                                        let trimmed_song_title =
+                                            &stream_title_substring[..right_index];
+                                        let mut song_title =
+                                            SONG_TITLE.lock().expect("Couldn't lock SONG_TITLE");
+                                        *song_title =
+                                            format!("Current Song: {}", trimmed_song_title);
                                     }
                                 }
                             }
@@ -96,8 +119,13 @@ pub(crate) async fn input(name: String, url: String) {
             }
             if should_restart {
                 if count_down == 0 {
-                    let output_sink_sender = OUTPUT_SENDER.lock().expect("Couldn't lock INNER_SINK_SENDER");
-                    if output_sink_sender.send(OutputCommands::Start(working_name.clone())).is_err() {
+                    let output_sink_sender = OUTPUT_SENDER
+                        .lock()
+                        .expect("Couldn't lock INNER_SINK_SENDER");
+                    if output_sink_sender
+                        .send(OutputCommands::Start(working_name.clone()))
+                        .is_err()
+                    {
                         let mut song_title = SONG_TITLE.lock().expect("Couldn't lock SONG_TITLE");
                         *song_title = STONG_TITLE_ERROR.to_string();
                         return;

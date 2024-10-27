@@ -1,18 +1,21 @@
 mod input;
 mod output;
 
+use eframe::glow::Context;
 use output::OutputCommands;
 
-use eframe::egui::{CentralPanel};
-use eframe::epaint::Vec2;
-use eframe::{App, run_native, NativeOptions};
+use eframe::egui::{CentralPanel, ViewportBuilder};
+use eframe::{run_native, App, NativeOptions};
 
 use once_cell::sync::Lazy;
 use pls::PlaylistElement;
 use tokio::task::JoinHandle;
 
 use std::fs::{self, File};
-use std::sync::{mpsc::{self, Sender}, Mutex};
+use std::sync::{
+    mpsc::{self, Sender},
+    Mutex,
+};
 
 const EMPTY_STRING: &str = "";
 const STONG_TITLE_ERROR: &str = "Error Please Try Again";
@@ -47,22 +50,38 @@ impl Default for Radio {
             creation_name: String::from("Enter Station Name"),
             creation_url: String::from("Enter Station URL"),
         }
-    }    
+    }
 }
 
 impl App for Radio {
     fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
         CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered_justified(|ui| {
-                if ui.button(if self.is_playing { "Pause" } else { "Play" }).clicked() {
-                    let output_sender = OUTPUT_SENDER.lock().expect("Couldn't lock OUTPUT_SINK_SENDER");
-                    if output_sender.send(if self.is_playing { OutputCommands::Pause } else { OutputCommands::Play }).is_err() {}
+                if ui
+                    .button(if self.is_playing { "Pause" } else { "Play" })
+                    .clicked()
+                {
+                    let output_sender = OUTPUT_SENDER
+                        .lock()
+                        .expect("Couldn't lock OUTPUT_SINK_SENDER");
+                    let _ = output_sender
+                        .send(if self.is_playing {
+                            OutputCommands::Pause
+                        } else {
+                            OutputCommands::Play
+                        })
+                        .is_err();
                     self.is_playing = !self.is_playing;
                 }
                 ui.add(eframe::egui::Slider::new(&mut self.volume, 0.0..=2.0).text("Volume"));
                 {
-                    let output_sink_sender = OUTPUT_SENDER.lock().expect("Couldn't lock OUTPUT_SINK_SENDER");
-                    if output_sink_sender.send(OutputCommands::Volume(self.volume)).is_err() {}
+                    let output_sink_sender = OUTPUT_SENDER
+                        .lock()
+                        .expect("Couldn't lock OUTPUT_SINK_SENDER");
+                    if output_sink_sender
+                        .send(OutputCommands::Volume(self.volume))
+                        .is_err()
+                    {}
                 }
                 ui.label(if let Some(station_name) = &self.current_station {
                     format!("Current Station: {}", station_name)
@@ -78,7 +97,10 @@ impl App for Radio {
                 if self.is_creation_visible {
                     ui.text_edit_singleline(&mut self.creation_name);
                     ui.text_edit_singleline(&mut self.creation_url);
-                    if ui.button("Create Station").clicked() && !self.creation_name.is_empty() && !self.creation_url.is_empty() {
+                    if ui.button("Create Station").clicked()
+                        && !self.creation_name.is_empty()
+                        && !self.creation_url.is_empty()
+                    {
                         create_station(self.creation_name.clone(), self.creation_url.clone());
                         self.is_creation_visible = false;
                         self.creation_name = String::from("Enter Station Name");
@@ -110,8 +132,10 @@ impl App for Radio {
                                 return;
                             }
                         }
-                        let output_sink_sender = OUTPUT_SENDER.lock().expect("Couldn't lock OUTPUT_SINK_SENDER");
-                        if output_sink_sender.send(OutputCommands::Pause).is_err() {}
+                        let output_sink_sender = OUTPUT_SENDER
+                            .lock()
+                            .expect("Couldn't lock OUTPUT_SINK_SENDER");
+                        let _ = output_sink_sender.send(OutputCommands::Pause);
                         if let Some(join_handle) = &self.input_join_handle {
                             join_handle.abort();
                         }
@@ -137,14 +161,13 @@ impl App for Radio {
         }
     }
 
-    fn on_close_event(&mut self) -> bool {
+    fn on_exit(&mut self, _gl: Option<&Context>) {
         if let Some(join_handle) = &self.input_join_handle {
             join_handle.abort();
         }
         self.input_join_handle = None;
         let output_sink_sender = OUTPUT_SENDER.lock().expect("Couldn't lock SINK_SENDER");
         if output_sink_sender.send(OutputCommands::Quit).is_err() {}
-        true
     }
 }
 
@@ -162,10 +185,17 @@ fn get_stations() -> Vec<Vec<PlaylistElement>> {
 
     if let Ok(entries) = fs::read_dir(&audio_dir) {
         for entry in entries.flatten() {
-            if entry.file_type().expect("Couldn't get entry file type").is_file() {
+            if entry
+                .file_type()
+                .expect("Couldn't get entry file type")
+                .is_file()
+            {
                 if let Ok(file_name_as_string) = entry.file_name().into_string() {
                     if file_name_as_string.ends_with(".pls") {
-                        stations.push(pls::parse(&mut File::open(entry.path()).expect("Couldn't open file")).expect("Couldn't parse playlist"));
+                        stations.push(
+                            pls::parse(&mut File::open(entry.path()).expect("Couldn't open file"))
+                                .expect("Couldn't parse playlist"),
+                        );
                     }
                 }
             }
@@ -191,14 +221,22 @@ fn create_station(name: String, url: String) {
         &[PlaylistElement {
             path: url,
             title: Some(name),
-            len:  pls::ElementLength::Unknown,
+            len: pls::ElementLength::Unknown,
         }],
-        &mut File::create(audio_dir).expect("Couldn't create station file")
-    ).expect("Coulnd't write to station pls");
+        &mut File::create(audio_dir).expect("Couldn't create station file"),
+    )
+    .expect("Coulnd't write to station pls");
 }
 
 #[tokio::main]
 async fn main() {
-    let app_options = NativeOptions { initial_window_size: Some(Vec2::new(320.0, 128.0)), ..Default::default() };
-    if run_native("Radio Rust", app_options, Box::new(|_cc| Box::<Radio>::default())).is_err() {}
+    let app_options = NativeOptions {
+        viewport: ViewportBuilder::default().with_inner_size([320.0, 128.0]),
+        ..Default::default()
+    };
+    let _ = run_native(
+        "Radio Rust",
+        app_options,
+        Box::new(|_cc| Ok(Box::<Radio>::default())),
+    );
 }
